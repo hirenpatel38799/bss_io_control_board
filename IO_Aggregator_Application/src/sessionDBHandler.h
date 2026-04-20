@@ -216,55 +216,6 @@ typedef enum
 #define SYSTEM_FAULT_NONE   (0UL)
 
 /* ============================================================================
- * BMS Fault Bitmap Bit Positions
- * ========================================================================== */
-
-/**
- * @brief Bit positions within the 32-bit BMS fault bitmap.
- */
-typedef enum
-{
-    /* Critical (bits 0–15) */
-    BMS_FAULT_ENERGY_TRANSFER_ERROR = 0,
-    BMS_FAULT_EV_CON_STATUS         = 1,
-    BMS_FAULT_CHARGING_STOP_CONTROL = 2,
-    BMS_FAULT_BATTERY_OVERVOLT      = 3,
-
-    /* Warnings (bits 16–31) */
-    BMS_WARN_HIGH_TEMP              = 16,
-    BMS_WARN_VOLTAGE_DEVIATION      = 17
-} eBMSFaultBits_t;
-
-/* ============================================================================
- * PM Fault Bitmap Bit Positions
- * ========================================================================== */
-
-/**
- * @brief Bit positions within the 32-bit PM fault bitmap.
- */
-typedef enum
-{
-    /* Critical (bits 0–15) */
-    PM_FAULT_INPUT_UNDERVOLT    = 0,
-    PM_FAULT_PHASE_LOSS         = 1,
-    PM_FAULT_INPUT_OVERVOLT     = 2,
-    PM_FAULT_OUTPUT_OVERVOLT    = 3,
-    PM_FAULT_OUTPUT_OVERCURRENT = 4,
-    PM_FAULT_OVER_TEMP          = 5,
-    PM_FAULT_FAN_FAULT          = 6,
-    PM_FAULT_HW_FAULT           = 7,
-    PM_FAULT_BUS_EXCEPTION      = 8,
-    PM_FAULT_SCI_EXCEPTION      = 9,
-    PM_FAULT_DISCHARGE_FAULT    = 10,
-    PM_FAULT_PFC_SHUTDOWN       = 11,
-
-    /* Warnings (bits 16–31) */
-    PM_WARN_OUTPUT_UNDERVOLT    = 16,
-    PM_WARN_OUTPUT_OVERVOLT     = 17,
-    PM_WARN_POWER_LIMIT         = 18
-} PM_FaultEnum_t;
-
-/* ============================================================================
  * Session Data Structure
  * ========================================================================== */
 

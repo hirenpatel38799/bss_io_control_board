@@ -67,24 +67,26 @@ extern "C" {
 /*==============================================================================
  * BMS FAULT BITMAP — protocol-independent
  *============================================================================*/
-#define BMS_FAULT_ENERGY_TRANSFER_ERROR     (1U << 0)
-#define BMS_FAULT_EV_CON_STATUS             (1U << 1)
-#define BMS_FAULT_CHARGING_STOP_CONTROL     (1U << 2)
-#define BMS_FAULT_BATTERY_OVERVOLT          (1U << 3)
-#define BMS_WARN_HIGH_TEMP                  (1U << 16)
-#define BMS_WARN_VOLTAGE_DEVIATION          (1U << 17)
+#define BMS_FAULT_ENERGY_TRANSFER_ERROR     (0U)
+#define BMS_FAULT_BATTERY_OVERVOLT          (1U)
+#define BMS_FAULT_BATTERY_UNDERVOLT         (2U)
+#define BMS_FAULT_BATTERY_CURRENT_DEVIATION (3U)
+#define BMS_FAULT_BATTERY_VOLTAGE_DEVIATION (4U)
+#define BMS_FAULT_CHARGING_STOP_CONTROL     (5U)
+
+#define BMS_WARN_HIGH_TEMP                  (16U)
 
 /*==============================================================================
  * PM FAULT BITMAP — protocol-independent
  *============================================================================*/
-#define PM_FAULT_INPUT_UNDERVOLT            (1U << 0)
-#define PM_FAULT_PHASE_LOSS                 (1U << 1)
-#define PM_FAULT_INPUT_OVERVOLT             (1U << 2)
-#define PM_FAULT_OUTPUT_OVERVOLT            (1U << 3)
-#define PM_FAULT_OUTPUT_OVERCURRENT         (1U << 4)
-#define PM_WARN_OUTPUT_UNDERVOLT            (1U << 12)
-#define PM_WARN_OUTPUT_OVERVOLT             (1U << 13)
-#define PM_WARN_POWER_LIMIT                 (1U << 14)
+#define PM_FAULT_INPUT_UNDERVOLT            (0U)
+#define PM_FAULT_PHASE_LOSS                 (1U)
+#define PM_FAULT_INPUT_OVERVOLT             (2U)
+#define PM_FAULT_OUTPUT_OVERVOLT            (3U)
+#define PM_FAULT_OUTPUT_OVERCURRENT         (4U)
+#define PM_WARN_OUTPUT_UNDERVOLT            (12U)
+#define PM_WARN_OUTPUT_OVERVOLT             (13U)
+#define PM_WARN_POWER_LIMIT                 (14U)
 
 /*==============================================================================
  * STOP REASON CODES — protocol-independent

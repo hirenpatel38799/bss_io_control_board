@@ -1003,27 +1003,36 @@ static bool bGetBMSFaultStatus(uint8_t u8DockNo)
         SYS_CONSOLE_PRINT("G%d: BMS EnergyTransferError\r\n", (int)u8DockNo);
         SET_BIT(u32FaultCode, BMS_FAULT_ENERGY_TRANSFER_ERROR);
     }
-    if (sFrame.LevdcRX_500ID_Info.u8EvChargingStopControl)
-    {
-        SYS_CONSOLE_PRINT("G%d: BMS ChargingStopControl\r\n", (int)u8DockNo);
-        SET_BIT(u32FaultCode, BMS_FAULT_CHARGING_STOP_CONTROL);
-    }
     if (sFrame.LevdcRX_500ID_Info.u8BatteryOverVol)
     {
         SYS_CONSOLE_PRINT("G%d: BMS BatteryOverVoltage\r\n", (int)u8DockNo);
         SET_BIT(u32FaultCode, BMS_FAULT_BATTERY_OVERVOLT);
+    }
+    if (sFrame.LevdcRX_500ID_Info.u8BatteryUnderVol)
+    {
+        SYS_CONSOLE_PRINT("G%d: BMS BatteryUnderVoltage\r\n", (int)u8DockNo);
+        SET_BIT(u32FaultCode, BMS_FAULT_BATTERY_UNDERVOLT);
+    }
+    if (sFrame.LevdcRX_500ID_Info.u8BatterCurrentDeviError)
+    {
+        SYS_CONSOLE_PRINT("G%d: BMS CurrentDeviation\r\n", (int)u8DockNo);
+        SET_BIT(u32FaultCode, BMS_FAULT_BATTERY_CURRENT_DEVIATION);
+    }
+    if (sFrame.LevdcRX_500ID_Info.u8BatterVoltageDeviError)
+    {
+        SYS_CONSOLE_PRINT("G%d: BMS VoltageDeviation (warning)\r\n", (int)u8DockNo);
+        SET_BIT(u32FaultCode, BMS_FAULT_BATTERY_VOLTAGE_DEVIATION);
+    }
+    if (sFrame.LevdcRX_500ID_Info.u8EvChargingStopControl)
+    {
+        SYS_CONSOLE_PRINT("G%d: BMS ChargingStopControl\r\n", (int)u8DockNo);
+        SET_BIT(u32FaultCode, BMS_FAULT_CHARGING_STOP_CONTROL);
     }
     if (sFrame.LevdcRX_500ID_Info.u8HighBatteryTemp)
     {
         SYS_CONSOLE_PRINT("G%d: BMS HighBatteryTemp (warning)\r\n", (int)u8DockNo);
         SET_BIT(u32FaultCode, BMS_WARN_HIGH_TEMP);
     }
-    if (sFrame.LevdcRX_500ID_Info.u8BatterVoltageDeviError)
-    {
-        SYS_CONSOLE_PRINT("G%d: BMS VoltageDeviation (warning)\r\n", (int)u8DockNo);
-        SET_BIT(u32FaultCode, BMS_WARN_VOLTAGE_DEVIATION);
-    }
-
     SESSION_SetBMSFaultBitmap(u8DockNo, u32FaultCode);
     return ((u32FaultCode & 0x0000FFFFUL) != 0U);
 
@@ -1062,6 +1071,7 @@ static bool bGetBMSFaultStatus(uint8_t u8DockNo)
 static bool bCheckStopCondition(uint8_t u8DockNo)
 {
     static uint32_t u32FaultCheckCooldownTick[MAX_DOCKS] = {0};
+    uint32_t u32CurrentTick = xTaskGetTickCount();
     CH_State_e eState = SESSION_GetChargingState(u8DockNo);
 
     /* 1. User stop command */
@@ -1073,11 +1083,11 @@ static bool bCheckStopCondition(uint8_t u8DockNo)
     }
 
     /* 2. Fault check (with cooldown) */
-    if (xTaskGetTickCount() >= u32FaultCheckCooldownTick[u8DockNo])
+    if (u32CurrentTick >= u32FaultCheckCooldownTick[u8DockNo])
     {
         if (bCheckFaultCondition(u8DockNo) == true)
         {
-            u32FaultCheckCooldownTick[u8DockNo] = xTaskGetTickCount() +
+            u32FaultCheckCooldownTick[u8DockNo] = u32CurrentTick +
                                                    pdMS_TO_TICKS(FAULT_CHECK_COOLDOWN_MS);
             SESSION_SetSessionEndReason(u8DockNo, STOP_REASON_FAULT);
             return true;
