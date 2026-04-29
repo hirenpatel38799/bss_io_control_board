@@ -185,45 +185,58 @@ static void prv_UpdateFromSession(uint8_t u8DockId)
     }
 
     /* ------- PM Data ------- */
-    /* Convert float V/A → uint32_t mV/mA with rounding */
-    telemetryData[u8DockId].pmData.u32PmOutputVoltage_mV =
-        (uint32_t)((SESSION_GetPmOutputVoltage(u8DockId) * FACTOR_1000_F) + 0.5f);
+    if (SESSION_GetPMRxStatus(u8DockId) == true)
+    {
+            /* Convert float V/A → uint32_t mV/mA with rounding */
+        telemetryData[u8DockId].pmData.u32PmOutputVoltage_mV =
+            (uint32_t)((SESSION_GetPmOutputVoltage(u8DockId) * FACTOR_1000_F) + 0.5f);
 
-    telemetryData[u8DockId].pmData.u32PmOutputCurrent_mA =
-        (uint32_t)((SESSION_GetPmOutputCurrent(u8DockId) * FACTOR_1000_F) + 0.5f);
+        telemetryData[u8DockId].pmData.u32PmOutputCurrent_mA =
+            (uint32_t)((SESSION_GetPmOutputCurrent(u8DockId) * FACTOR_1000_F) + 0.5f);
 
-    telemetryData[u8DockId].pmData.u32OutputPower_W =
-        (uint32_t)(SESSION_GetOutputPower(u8DockId) + 0.5f);
+        telemetryData[u8DockId].pmData.u32OutputPower_W =
+            (uint32_t)(SESSION_GetOutputPower(u8DockId) + 0.5f);
 
-    /* Energy: session stores kWh, telemetry reports Wh */
-    telemetryData[u8DockId].pmData.u32TotalEnergy_Wh =
-        (uint32_t)((SESSION_GetEnergyDelivered(u8DockId) * FACTOR_1000_F) + 0.5f);
+        /* Energy: session stores kWh, telemetry reports Wh */
+        telemetryData[u8DockId].pmData.u32TotalEnergy_Wh =
+            (uint32_t)((SESSION_GetEnergyDelivered(u8DockId) * FACTOR_1000_F) + 0.5f);
 
-    telemetryData[u8DockId].pmData.u32PMFaultCode  = SESSION_GetPMFaultBitmap(u8DockId);
-    telemetryData[u8DockId].pmData.u8PMTemperature = SESSION_GetPMTemperature(u8DockId);
-    telemetryData[u8DockId].pmData.u8PMStatus      = SESSION_GetPMRxStatus(u8DockId);
+        telemetryData[u8DockId].pmData.u32PMFaultCode  = SESSION_GetPMFaultBitmap(u8DockId);
+        telemetryData[u8DockId].pmData.u8PMTemperature = SESSION_GetPMTemperature(u8DockId);
+        telemetryData[u8DockId].pmData.u8PMStatus      = SESSION_GetPMRxStatus(u8DockId);
+    } else {
+        /* No PM connection — zero out all PM fields for clarity */
+        (void)memset(&telemetryData[u8DockId].pmData, 0, sizeof(telemetryData[u8DockId].pmData));
+    }
+    
 
     /* ------- BMS Data ------- */
-    telemetryData[u8DockId].bmsData.u32BMSDemandVoltage =
-        (uint32_t)((SESSION_GetBMSDemandVoltage(u8DockId) * FACTOR_1000_F) + 0.5f);
+    if (SESSION_GetBMSRxStatus(u8DockId) == true)
+    {
+        telemetryData[u8DockId].bmsData.u32BMSDemandVoltage =
+            (uint32_t)((SESSION_GetBMSDemandVoltage(u8DockId) * FACTOR_1000_F) + 0.5f);
 
-    telemetryData[u8DockId].bmsData.u32BMSDemandCurrent =
-        (uint32_t)((SESSION_GetBMSDemandCurrent(u8DockId) * FACTOR_1000_F) + 0.5f);
+        telemetryData[u8DockId].bmsData.u32BMSDemandCurrent =
+            (uint32_t)((SESSION_GetBMSDemandCurrent(u8DockId) * FACTOR_1000_F) + 0.5f);
 
-    telemetryData[u8DockId].bmsData.u32EstimatedTime_s  =
-        (uint32_t)SESSION_GetEstimatedChargingTime(u8DockId);
+        telemetryData[u8DockId].bmsData.u32EstimatedTime_s  =
+            (uint32_t)SESSION_GetEstimatedChargingTime(u8DockId);
 
-    telemetryData[u8DockId].bmsData.u32BMSFaultCode     = SESSION_GetBMSFaultBitmap(u8DockId);
-    telemetryData[u8DockId].bmsData.u8CurrentSoc        = SESSION_GetCurrentSoc(u8DockId);
-    telemetryData[u8DockId].bmsData.u8InitialSoc        = SESSION_GetInitialSoc(u8DockId);
-    telemetryData[u8DockId].bmsData.u8BMSTemperature    = SESSION_GetBMSTemperature(u8DockId);
-    telemetryData[u8DockId].bmsData.u8BMSStatus         = SESSION_GetBMSRxStatus(u8DockId);
-    telemetryData[u8DockId].bmsData.u8ChargingState     = (uint8_t)SESSION_GetChargingState(u8DockId);
+        telemetryData[u8DockId].bmsData.u32BMSFaultCode     = SESSION_GetBMSFaultBitmap(u8DockId);
+        telemetryData[u8DockId].bmsData.u8CurrentSoc        = SESSION_GetCurrentSoc(u8DockId);
+        telemetryData[u8DockId].bmsData.u8InitialSoc        = SESSION_GetInitialSoc(u8DockId);
+        telemetryData[u8DockId].bmsData.u8BMSTemperature    = SESSION_GetBMSTemperature(u8DockId);
+        telemetryData[u8DockId].bmsData.u8BMSStatus         = SESSION_GetBMSRxStatus(u8DockId);
+        telemetryData[u8DockId].bmsData.u8ChargingState     = (uint8_t)SESSION_GetChargingState(u8DockId);
 
-    /* BUG FIX: was SESSION_GetBMSFaultBitmap (duplicate) — now system fault bitmap */
-    telemetryData[u8DockId].bmsData.u32SystemFaultBitmap =
-        SESSION_GetSystemFaultBitmap(u8DockId);
-
+        /* BUG FIX: was SESSION_GetBMSFaultBitmap (duplicate) — now system fault bitmap */
+        telemetryData[u8DockId].bmsData.u32SystemFaultBitmap =
+            SESSION_GetSystemFaultBitmap(u8DockId);
+    } else {
+        /* No BMS connection — zero out all BMS fields for clarity */
+        (void)memset(&telemetryData[u8DockId].bmsData, 0, sizeof(telemetryData[u8DockId].bmsData));
+    }
+    
     /* ------- Temperature Data ------- */
     /* COMPARTMENT (index 0) holds the enclosure sensor */
     telemetryData[u8DockId].tempData.u8CompartmentTemperature =
@@ -532,15 +545,15 @@ void Telemetry_Task(void *pvParameters)
         {
             prv_UpdateFromSession(u8DockNo);
 
-            prv_SendBMS(TELEMETRY_COMPARTMENT_ID, u8DockNo);
+            prv_SendBMS(COMPARTMENT_ID, u8DockNo);
             vTaskDelay(pdMS_TO_TICKS(TELEMETRY_INTER_SEND_MS));
 
-            prv_SendPM(TELEMETRY_COMPARTMENT_ID, u8DockNo);
+            prv_SendPM(COMPARTMENT_ID, u8DockNo);
             vTaskDelay(pdMS_TO_TICKS(TELEMETRY_INTER_SEND_MS));
         }
 
         /* Step 4: Broadcast combined temperature frame (all docks) */
-        prv_SendTemperature(TELEMETRY_COMPARTMENT_ID);
+        prv_SendTemperature(COMPARTMENT_ID);
 
         /* Step 5: Wait until next broadcast interval */
         vTaskDelay(pdMS_TO_TICKS(TELEMETRY_TASK_DELAY_MS));

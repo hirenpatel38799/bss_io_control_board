@@ -350,10 +350,11 @@ uint8_t TCA9539_ReadRegister(uint8_t reg);
  * @param  u8DockNo   Dock index — used as array index into Gpio_conf arrays.
  *                    Must satisfy: 0 < u8DockNo < MAX_DOCKS for per-dock ops.
  *                    Compartment-level ops (DO_COMPARTMENT_FAN_*) ignore this.
+ * @param  eGPIODirection  GPIO direction (GPIO_READ or GPIO_WRITE)
  * @return true   for write ops (always), or pin state for read ops
  * @return false  on invalid operation or pin error
  */
-bool bGPIO_Operation(GPIOOperation_e eGPIOType, uint8_t u8DockNo);
+bool bGPIO_Operation(GPIOOperation_e eGPIOType, uint8_t u8DockNo, GPIO_Direction_e eGPIODirection);
 
 /**
  * @brief  Save digital and relay output states to flash.

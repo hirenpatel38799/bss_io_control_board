@@ -444,8 +444,7 @@ static void v17017_StartCharging(uint8_t u8DockNo)
     sFrame.LevdcTX_509ID_Info.u16EVSEoutputVoltage  = (uint16_t)(SESSION_GetPmOutputVoltage(u8DockNo) * FACTOR_10);
     sFrame.LevdcTX_509ID_Info.u16EVSEoutputCurrent  = (uint16_t)(SESSION_GetPmOutputCurrent(u8DockNo) * FACTOR_10);
 
-    bGPIO_Operation(DO_AC_RELAY_ON, u8DockNo);
-    bGPIO_Operation(DO_DC_RELAY_ON, u8DockNo);
+    bGPIO_Operation(DO_DC_RELAY_ON, u8DockNo, GPIO_WRITE);
 
     (void)bGetSetLevdcBMSData(u8DockNo, &sFrame, SET_PARA);
 
@@ -465,8 +464,8 @@ static void v17017_StartCharging(uint8_t u8DockNo)
  */
 static void v17017_Shutdown(uint8_t u8DockNo)
 {
-    bGPIO_Operation(DO_AC_RELAY_OFF, u8DockNo);
-    bGPIO_Operation(DO_DC_RELAY_OFF, u8DockNo);
+    // bGPIO_Operation(DO_AC_RELAY_OFF, u8DockNo);
+    bGPIO_Operation(DO_DC_RELAY_OFF, u8DockNo, GPIO_WRITE);
     SESSION_SetPMState(u8DockNo, RECTIFIER_OFF);
 
     ChargingMsgFrameInfo_t sFrame = {0};
@@ -762,8 +761,8 @@ static void vTVS_StartCharging(uint8_t u8DockNo)
     sFrame.TVS_Tx90_ChargerInfo.u8Counter++;
 
     /* --- Enable relays --- */
-    bGPIO_Operation(DO_AC_RELAY_ON, u8DockNo);
-    bGPIO_Operation(DO_DC_RELAY_ON, u8DockNo);
+    // bGPIO_Operation(DO_AC_RELAY_ON, u8DockNo);
+    bGPIO_Operation(DO_DC_RELAY_ON, u8DockNo, GPIO_WRITE);
     
     (void)bGetSetTVSBMSData(u8DockNo, &sFrame, SET_PARA);
 
@@ -786,8 +785,8 @@ static void vTVS_StartCharging(uint8_t u8DockNo)
  */
 static void vTVS_Shutdown(uint8_t u8DockNo)
 {
-    bGPIO_Operation(DO_AC_RELAY_OFF, u8DockNo);
-    bGPIO_Operation(DO_DC_RELAY_OFF, u8DockNo);
+    // bGPIO_Operation(DO_AC_RELAY_OFF, u8DockNo);
+    bGPIO_Operation(DO_DC_RELAY_OFF, u8DockNo, GPIO_WRITE);
     SESSION_SetPMState(u8DockNo, RECTIFIER_OFF);
 
     TVS_MsgFrameInfo_t sFrame = {0};
@@ -1119,14 +1118,14 @@ static bool bCheckFaultCondition(uint8_t u8DockNo)
     {
         SET_BIT(u32SystemFault, SYSTEM_FAULT_ESTOP_TRIGGERED);
     }
-    if (bCheckBMSFault(u8DockNo))
-    {
-        SET_BIT(u32SystemFault, SYSTEM_FAULT_BMS_ERROR);
-    }
-    if (bCheckPMFault(u8DockNo))
-    {
-        SET_BIT(u32SystemFault, SYSTEM_FAULT_PM_ERROR);
-    }
+    // if (bCheckBMSFault(u8DockNo))
+    // {
+    //     SET_BIT(u32SystemFault, SYSTEM_FAULT_BMS_ERROR);
+    // }
+    // if (bCheckPMFault(u8DockNo))
+    // {
+    //     SET_BIT(u32SystemFault, SYSTEM_FAULT_PM_ERROR);
+    // }
     if (bCheckBMSStatus(u8DockNo))
     {
         SET_BIT(u32SystemFault, SYSTEM_FAULT_BMS_COMMUNICATION_FAILURE);
@@ -1135,10 +1134,10 @@ static bool bCheckFaultCondition(uint8_t u8DockNo)
     {
         SET_BIT(u32SystemFault, SYSTEM_FAULT_PM_COMMUNICATION_FAILURE);
     }
-    if (bCheckZeroCurrentFault(u8DockNo))
-    {
-        SET_BIT(u32SystemFault, SYSTEM_FAULT_PM_ZERO_CURRENT);
-    }
+    // if (bCheckZeroCurrentFault(u8DockNo))
+    // {
+    //     SET_BIT(u32SystemFault, SYSTEM_FAULT_PM_ZERO_CURRENT);
+    // }
     if (bCheckPrechargeFailure(u8DockNo))
     {
         SET_BIT(u32SystemFault, SYSTEM_FAULT_PRECHARGE_FAILURE);
@@ -1151,7 +1150,7 @@ static bool bCheckFaultCondition(uint8_t u8DockNo)
 /** @brief Check Emergency Stop GPIO input. */
 static bool bCheckEStopFault(uint8_t u8DockNo)
 {
-    return (bGPIO_Operation(DI_E_STOP_STATUS, u8DockNo) == true);
+    return (bGPIO_Operation(DI_E_STOP_STATUS, u8DockNo, GPIO_READ) == true);
 }
 
 /**
@@ -1580,13 +1579,13 @@ static void CHARGING_TASK(void *pvParameters)
     {
         for (uint8_t u8DockNo = DOCK_1; u8DockNo < MAX_DOCKS; u8DockNo++)
         {
+            vDummyDataUpdate(u8DockNo); // Simulate BMS/PM data for testing
             vChargingProcessHandler(u8DockNo);
             Charging_StateMachine(u8DockNo);
         }
         vTaskDelay(pdMS_TO_TICKS(CHARGING_TASK_DELAY_MS));
     }
 }
-
 
 /* ============================================================
  * SECTION 9: LED CONTROL
@@ -1745,4 +1744,67 @@ bool ChargingTask_Init(void)
         SYS_CONSOLE_PRINT("CHARGING_TASK creation FAILED\r\n");
     }
     return bStatus;
+}
+
+void vDummyDataUpdate(uint8_t u8DockNo)
+{
+    if (COMPARTMENT_ID == 1)
+    {
+        return;
+    }
+
+    float fVoltage = 52.0f + u8DockNo; // dock-wise increment
+    float fCurrent = 40.0f + u8DockNo;
+    uint16_t u16FaultInfo = 0; // No faults in dummy data
+    static uint8_t u8Counter = 0;
+    if (bGPIO_Operation(DO_AC_RELAY_ON, u8DockNo, GPIO_READ) == true)
+    {
+        TVS_MsgFrameInfo_t sFrame = {0};
+        (void)bGetSetTVSBMSData(u8DockNo, &sFrame, GET_PARA);
+        /* ==========================================================
+         * 0x100 - BMS STATUS (RX → Charger)
+         * ========================================================== */
+        sFrame.TVS_Rx100_BMSStatus.u16BMSCurrent =
+            (uint16_t)(fCurrent / 0.03125f); // ~1280
+
+        sFrame.TVS_Rx100_BMSStatus.u16BMSVoltage =
+            (uint16_t)(fVoltage / 0.015625f); // ~3328
+
+        sFrame.TVS_Rx100_BMSStatus.u8Counter = u8Counter++;
+        sFrame.TVS_Rx100_BMSStatus.u8SOC = 80 + u8DockNo;
+        sFrame.TVS_Rx100_BMSStatus.u8ErrorState = 0;
+        sFrame.TVS_Rx100_BMSStatus.u8Temperature = (25 + 30); // offset -30
+
+        /* ==========================================================
+         * 0x101 - BMS PROFILE (RX → Charger)  ⭐ IMPORTANT
+         * ========================================================== */
+
+        sFrame.TVS_Rx101_BMSProfile.u16MaxChargeVoltage =
+            (uint16_t)(fVoltage * 1000.0f);
+
+        sFrame.TVS_Rx101_BMSProfile.u16MaxChargeCurrent =
+            (uint16_t)(fCurrent * 1000.0f);
+
+        sFrame.TVS_Rx101_BMSProfile.u16CutOffChargeCurrent =
+            (uint16_t)(5.0f * 1000.0f);
+
+        sFrame.TVS_Rx101_BMSProfile.u16PreChargeCurrent =
+            (uint16_t)(2.0f * 1000.0f);
+
+        (void)bGetSetTVSBMSData(u8DockNo, &sFrame, SET_PARA);
+        SESSION_SetBMSLastRxTime(u8DockNo, xTaskGetTickCount());
+    }
+
+    /* ==========================================================
+     * PM Data Update (simulate PM response based on BMS profile) ⭐ IMPORTANT
+     * ========================================================== */
+    if (bGPIO_Operation(DO_AC_RELAY_ON, u8DockNo, GPIO_READ) == true)
+    {
+        
+        SESSION_SetPmOutputVoltage(u8DockNo, fVoltage);
+        SESSION_SetPmOutputCurrent(u8DockNo, fCurrent);
+        SESSION_SetPMFaultCode(u8DockNo, u16FaultInfo);
+        SESSION_SetPMLastRxTime(u8DockNo, xTaskGetTickCount());
+    }
+
 }

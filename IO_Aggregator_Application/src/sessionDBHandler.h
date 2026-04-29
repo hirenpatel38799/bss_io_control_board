@@ -56,7 +56,8 @@ extern "C" {
 
 /** @brief Sentinel value for an uninitialised / invalid session index */
 #define SESSION_INVALID_IDX       (0xFFU)
-
+#define COMPARTMENT_ID        (0x03U)   /**< Fixed compartment identifier */
+#define COMPARTMENT_IP        "192.168.1.233"
 /* ============================================================================
  * Bit-manipulation helpers
  * ========================================================================== */
@@ -106,6 +107,11 @@ typedef enum
     MAX_DOCKS          /**< Total array size (do not use as index)*/
 } Dock_e;
 
+/** @brief GPIO direction enumeration */
+typedef enum {
+    GPIO_READ = 0,
+    GPIO_WRITE = 1
+}GPIO_Direction_e;
 /* ============================================================================
  * CAN Bus Enumeration
  * ========================================================================== */

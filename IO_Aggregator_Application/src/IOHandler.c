@@ -529,55 +529,55 @@ static void prv_ReadOutputsFromFlash(void)
         /* --- Restore relay outputs --- */
         /* BUG FIX: use local variable from flash, not global relayStatus */
         uint16_t u16SavedRelay = writeData.relayOutputs;
-        for (uint8_t i = 0U; i < (uint8_t)NUM_RELAY_PINS; i++)
-        {
-            bool bSet = ((u16SavedRelay & (uint16_t)(1U << i)) != 0U);
-            switch (i)
-            {
-                case 0U: bSet ? efuse1_in_Set()        : efuse1_in_Clear();        break;
-                case 1U: bSet ? efuse2_in_Set()        : efuse2_in_Clear();        break;
-                case 2U: bSet ? efuse3_in_Set()        : efuse3_in_Clear();        break;
-                case 3U: bSet ? efuse4_in_Set()        : efuse4_in_Clear();        break;
-                case 4U: bSet ? Relay_Output_1_Set()   : Relay_Output_1_Clear();   break;
-                case 5U: bSet ? Relay_Output_2_Set()   : Relay_Output_2_Clear();   break;
-                default: break;
-            }
-        }
+        // for (uint8_t i = 0U; i < (uint8_t)NUM_RELAY_PINS; i++)
+        // {
+        //     bool bSet = ((u16SavedRelay & (uint16_t)(1U << i)) != 0U);
+        //     switch (i)
+        //     {
+        //         case 0U: bSet ? efuse1_in_Set()        : efuse1_in_Clear();        break;
+        //         case 1U: bSet ? efuse2_in_Set()        : efuse2_in_Clear();        break;
+        //         case 2U: bSet ? efuse3_in_Set()        : efuse3_in_Clear();        break;
+        //         case 3U: bSet ? efuse4_in_Set()        : efuse4_in_Clear();        break;
+        //         case 4U: bSet ? Relay_Output_1_Set()   : Relay_Output_1_Clear();   break;
+        //         case 5U: bSet ? Relay_Output_2_Set()   : Relay_Output_2_Clear();   break;
+        //         default: break;
+        //     }
+        // }
 
         /* --- Restore digital outputs --- */
         uint32_t u32SavedDO = writeData.digitalOutputs;
-        for (uint8_t i = 0U; i < (uint8_t)NUM_DO_PINS; i++)
-        {
-            bool bSet = ((u32SavedDO & (1UL << i)) != 0U);
-            switch (i)
-            {
-                case  0U: bSet ? Digital_Output_1_Set()  : Digital_Output_1_Clear();  break;
-                case  1U: bSet ? Digital_Output_2_Set()  : Digital_Output_2_Clear();  break;
-                case  2U: bSet ? Digital_Output_3_Set()  : Digital_Output_3_Clear();  break;
-                case  3U: bSet ? Digital_Output_4_Set()  : Digital_Output_4_Clear();  break;
-                case  4U: bSet ? Digital_Output_5_Set()  : Digital_Output_5_Clear();  break;
-                case  5U: bSet ? Digital_Output_6_Set()  : Digital_Output_6_Clear();  break;
-                case  6U: bSet ? Digital_Output_7_Set()  : Digital_Output_7_Clear();  break;
-                case  7U: bSet ? Digital_Output_8_Set()  : Digital_Output_8_Clear();  break;
-                case  8U: bSet ? Digital_Output_9_Set()  : Digital_Output_9_Clear();  break;
-                case  9U: bSet ? Digital_Output_10_Set() : Digital_Output_10_Clear(); break;
-                case 10U: bSet ? Digital_Output_11_Set() : Digital_Output_11_Clear(); break;
-                case 11U: bSet ? Digital_Output_12_Set() : Digital_Output_12_Clear(); break;
-                case 12U: bSet ? Digital_Output_13_Set() : Digital_Output_13_Clear(); break;
-                case 13U: bSet ? Digital_Output_14_Set() : Digital_Output_14_Clear(); break;
-                case 14U: bSet ? Digital_Output_15_Set() : Digital_Output_15_Clear(); break;
-                case 15U: bSet ? Digital_Output_16_Set() : Digital_Output_16_Clear(); break;
-                case 16U: bSet ? Digital_Output_17_Set() : Digital_Output_17_Clear(); break;
-                case 17U: bSet ? Digital_Output_18_Set() : Digital_Output_18_Clear(); break;
-                case 18U: bSet ? Digital_Output_19_Set() : Digital_Output_19_Clear(); break;
-                case 19U: bSet ? Digital_Output_20_Set() : Digital_Output_20_Clear(); break;
-                case 20U: bSet ? Digital_Output_21_Set() : Digital_Output_21_Clear(); break;
-                case 21U: bSet ? Digital_Output_22_Set() : Digital_Output_22_Clear(); break;
-                case 22U: bSet ? Digital_Output_23_Set() : Digital_Output_23_Clear(); break;
-                case 23U: bSet ? Digital_Output_24_Set() : Digital_Output_24_Clear(); break;
-                default: break;
-            }
-        }
+        // for (uint8_t i = 0U; i < (uint8_t)NUM_DO_PINS; i++)
+        // {
+        //     bool bSet = ((u32SavedDO & (1UL << i)) != 0U);
+        //     switch (i)
+        //     {
+        //         case  0U: bSet ? Digital_Output_1_Set()  : Digital_Output_1_Clear();  break;
+        //         case  1U: bSet ? Digital_Output_2_Set()  : Digital_Output_2_Clear();  break;
+        //         case  2U: bSet ? Digital_Output_3_Set()  : Digital_Output_3_Clear();  break;
+        //         case  3U: bSet ? Digital_Output_4_Set()  : Digital_Output_4_Clear();  break;
+        //         case  4U: bSet ? Digital_Output_5_Set()  : Digital_Output_5_Clear();  break;
+        //         case  5U: bSet ? Digital_Output_6_Set()  : Digital_Output_6_Clear();  break;
+        //         case  6U: bSet ? Digital_Output_7_Set()  : Digital_Output_7_Clear();  break;
+        //         case  7U: bSet ? Digital_Output_8_Set()  : Digital_Output_8_Clear();  break;
+        //         case  8U: bSet ? Digital_Output_9_Set()  : Digital_Output_9_Clear();  break;
+        //         case  9U: bSet ? Digital_Output_10_Set() : Digital_Output_10_Clear(); break;
+        //         case 10U: bSet ? Digital_Output_11_Set() : Digital_Output_11_Clear(); break;
+        //         case 11U: bSet ? Digital_Output_12_Set() : Digital_Output_12_Clear(); break;
+        //         case 12U: bSet ? Digital_Output_13_Set() : Digital_Output_13_Clear(); break;
+        //         case 13U: bSet ? Digital_Output_14_Set() : Digital_Output_14_Clear(); break;
+        //         case 14U: bSet ? Digital_Output_15_Set() : Digital_Output_15_Clear(); break;
+        //         case 15U: bSet ? Digital_Output_16_Set() : Digital_Output_16_Clear(); break;
+        //         case 16U: bSet ? Digital_Output_17_Set() : Digital_Output_17_Clear(); break;
+        //         case 17U: bSet ? Digital_Output_18_Set() : Digital_Output_18_Clear(); break;
+        //         case 18U: bSet ? Digital_Output_19_Set() : Digital_Output_19_Clear(); break;
+        //         case 19U: bSet ? Digital_Output_20_Set() : Digital_Output_20_Clear(); break;
+        //         case 20U: bSet ? Digital_Output_21_Set() : Digital_Output_21_Clear(); break;
+        //         case 21U: bSet ? Digital_Output_22_Set() : Digital_Output_22_Clear(); break;
+        //         case 22U: bSet ? Digital_Output_23_Set() : Digital_Output_23_Clear(); break;
+        //         case 23U: bSet ? Digital_Output_24_Set() : Digital_Output_24_Clear(); break;
+        //         default: break;
+        //     }
+        // }
 
 #if HEV_IO_Aggregator
         /* Restore RS-485 UART configuration */
@@ -825,10 +825,10 @@ void ReadAllAnalogInputPins(void)
     }
 
     /* Update session DB temperatures — convert back to °C */
-    SESSION_SetDockTemperature((uint8_t)DOCK_1,       (uint8_t)(currentTempAIQueueBuffer[0] / 100U));
-    SESSION_SetDockTemperature((uint8_t)DOCK_2,       (uint8_t)(currentTempAIQueueBuffer[1] / 100U));
-    SESSION_SetDockTemperature((uint8_t)DOCK_3,       (uint8_t)(currentTempAIQueueBuffer[2] / 100U));
-    SESSION_SetDockTemperature((uint8_t)COMPARTMENT,  (uint8_t)(currentTempAIQueueBuffer[3] / 100U));
+    SESSION_SetDockTemperature((uint8_t)DOCK_1,       (uint8_t)(currentTempAIQueueBuffer[6])); // Chennel 6 is DOCK_1, Channel 7 is DOCK_2, Channel 8 is DOCK_3, Channel 9 is COMPARTMENT
+    SESSION_SetDockTemperature((uint8_t)DOCK_2,       (uint8_t)(currentTempAIQueueBuffer[7]));
+    SESSION_SetDockTemperature((uint8_t)DOCK_3,       (uint8_t)(currentTempAIQueueBuffer[8]));
+    SESSION_SetDockTemperature((uint8_t)COMPARTMENT,  (uint8_t)(currentTempAIQueueBuffer[9]));
 }
 
 /* ============================================================================
@@ -911,7 +911,7 @@ static void prv_ReadDigitalInputs(void)
     if (!s_boardSelectionDone)
     {
         s_boardSelectionDone = true;
-        prv_SetStaticIPAddress("192.168.1.231");
+        prv_SetStaticIPAddress(COMPARTMENT_IP);
     }
 }
 
@@ -921,7 +921,7 @@ static void prv_ReadDigitalInputs(void)
 
 /**
  * @brief  Disable DHCP and assign a static IP to the GMAC interface.
- * @param  pcIpStr  IP address string (e.g. "192.168.1.231")
+ * @param  pcIpStr  IP address string (e.g. COMPARTMENT_IP)
  */
 static void prv_SetStaticIPAddress(const char *pcIpStr)
 {
@@ -1140,7 +1140,15 @@ static void prv_GPIO_Write(uint16_t u16PortNo, bool bVal, uint8_t *pu8ErrorCode)
         *pu8ErrorCode = k_ErrInvalidPort;
         return;
     }
-
+    // static bool befuseDen = true;
+    // if (befuseDen)
+    // {
+    //     efuse1_den_Set();
+    //     efuse2_den_Set();
+    //     efuse3_den_Set();
+    //     efuse4_den_Set();
+    //     befuseDen = false;
+    // }
     switch (u16PortNo)
     {
         case 61U: bVal ? Digital_Output_1_Set()  : Digital_Output_1_Clear();  break;
@@ -1193,11 +1201,15 @@ static void prv_GPIO_Write(uint16_t u16PortNo, bool bVal, uint8_t *pu8ErrorCode)
  *
  * @param  eGPIOType  Operation
  * @param  u8DockNo   Dock index (used for per-dock operations)
+ * @param  eGPIODirection  GPIO direction (GPIO_READ or GPIO_WRITE)
  * @return bool       Pin state for reads; true for writes; false on error
  */
-bool bGPIO_Operation(GPIOOperation_e eGPIOType, uint8_t u8DockNo)
+bool bGPIO_Operation(GPIOOperation_e eGPIOType, uint8_t u8DockNo, GPIO_Direction_e eGPIODirection)
 {
     uint8_t u8Err = k_ErrNone;
+    uint16_t u16PinNo = 0U;
+    bool bWriteVal = false;
+    bool bIsInputOp = false;
 
     /* Per-dock operations need a valid dock index */
     bool bPerDockOp = (eGPIOType != DO_COMPARTMENT_FAN_HIGH) &&
@@ -1212,89 +1224,117 @@ bool bGPIO_Operation(GPIOOperation_e eGPIOType, uint8_t u8DockNo)
         return false;
     }
 
+    /* Determine pin and operation type */
     switch (eGPIOType)
     {
         case DO_AC_RELAY_ON:
-            prv_GPIO_Write(k_GpioConf.AC_Relay_Pin[u8DockNo], true, &u8Err);
-            return (u8Err == k_ErrNone);
-
+            u16PinNo = k_GpioConf.AC_Relay_Pin[u8DockNo];
+            bWriteVal = true;
+            break;
         case DO_AC_RELAY_OFF:
-            prv_GPIO_Write(k_GpioConf.AC_Relay_Pin[u8DockNo], false, &u8Err);
-            return (u8Err == k_ErrNone);
-
+            u16PinNo = k_GpioConf.AC_Relay_Pin[u8DockNo];
+            bWriteVal = false;
+            break;
         case DO_DC_RELAY_ON:
-            prv_GPIO_Write(k_GpioConf.DC_Relay_Pin[u8DockNo], true, &u8Err);
-            return (u8Err == k_ErrNone);
-
+            u16PinNo = k_GpioConf.DC_Relay_Pin[u8DockNo];
+            bWriteVal = true;
+            break;
         case DO_DC_RELAY_OFF:
-            prv_GPIO_Write(k_GpioConf.DC_Relay_Pin[u8DockNo], false, &u8Err);
-            return (u8Err == k_ErrNone);
-
+            u16PinNo = k_GpioConf.DC_Relay_Pin[u8DockNo];
+            bWriteVal = false;
+            break;
         case DO_SOLENOID_HIGH:
-            /* BUG FIX: was vTaskDelay(100) — needs pdMS_TO_TICKS */
-            prv_GPIO_Write(k_GpioConf.Solenoid_PinHi[u8DockNo], true, &u8Err);
-            vTaskDelay(pdMS_TO_TICKS(SOLENOID_PULSE_MS));
-            prv_GPIO_Write(k_GpioConf.Solenoid_PinHi[u8DockNo], false, &u8Err);
-            return (u8Err == k_ErrNone);
-
+            u16PinNo = k_GpioConf.Solenoid_PinHi[u8DockNo];
+            bWriteVal = true; /* Pulse high */
+            break;
         case DO_SOLENOID_LOW:
-            prv_GPIO_Write(k_GpioConf.Solenoid_PinLo[u8DockNo], true, &u8Err);
-            vTaskDelay(pdMS_TO_TICKS(SOLENOID_PULSE_MS));
-            prv_GPIO_Write(k_GpioConf.Solenoid_PinLo[u8DockNo], false, &u8Err);
-            return (u8Err == k_ErrNone);
-
+            u16PinNo = k_GpioConf.Solenoid_PinLo[u8DockNo];
+            bWriteVal = true; /* Pulse low */
+            break;
         case DO_R_LED_HIGH:
-            prv_GPIO_Write(k_GpioConf.R_LED_Pin[u8DockNo], true, &u8Err);
-            return (u8Err == k_ErrNone);
-
+            u16PinNo = k_GpioConf.R_LED_Pin[u8DockNo];
+            bWriteVal = true;
+            break;
         case DO_R_LED_LOW:
-            prv_GPIO_Write(k_GpioConf.R_LED_Pin[u8DockNo], false, &u8Err);
-            return (u8Err == k_ErrNone);
-
+            u16PinNo = k_GpioConf.R_LED_Pin[u8DockNo];
+            bWriteVal = false;
+            break;
         case DO_G_LED_HIGH:
-            prv_GPIO_Write(k_GpioConf.G_LED_Pin[u8DockNo], true, &u8Err);
-            return (u8Err == k_ErrNone);
-
+            u16PinNo = k_GpioConf.G_LED_Pin[u8DockNo];
+            bWriteVal = true;
+            break;
         case DO_G_LED_LOW:
-            prv_GPIO_Write(k_GpioConf.G_LED_Pin[u8DockNo], false, &u8Err);
-            return (u8Err == k_ErrNone);
-
+            u16PinNo = k_GpioConf.G_LED_Pin[u8DockNo];
+            bWriteVal = false;
+            break;
         case DO_B_LED_HIGH:
-            prv_GPIO_Write(k_GpioConf.B_LED_Pin[u8DockNo], true, &u8Err);
-            return (u8Err == k_ErrNone);
-
+            u16PinNo = k_GpioConf.B_LED_Pin[u8DockNo];
+            bWriteVal = true;
+            break;
         case DO_B_LED_LOW:
-            prv_GPIO_Write(k_GpioConf.B_LED_Pin[u8DockNo], false, &u8Err);
-            return (u8Err == k_ErrNone);
-
+            u16PinNo = k_GpioConf.B_LED_Pin[u8DockNo];
+            bWriteVal = false;
+            break;
         case DO_DOCK_FAN_HIGH:
-            prv_GPIO_Write(k_GpioConf.Dock_Fan_Pin[u8DockNo], true, &u8Err);
-            return (u8Err == k_ErrNone);
-
+            u16PinNo = k_GpioConf.Dock_Fan_Pin[u8DockNo];
+            bWriteVal = true;
+            break;
         case DO_DOCK_FAN_LOW:
-            prv_GPIO_Write(k_GpioConf.Dock_Fan_Pin[u8DockNo], false, &u8Err);
-            return (u8Err == k_ErrNone);
-
+            u16PinNo = k_GpioConf.Dock_Fan_Pin[u8DockNo];
+            bWriteVal = false;
+            break;
         case DO_COMPARTMENT_FAN_HIGH:
-            prv_GPIO_Write(k_GpioConf.Compartment_Fan_Pin, true, &u8Err);
-            return (u8Err == k_ErrNone);
-
+            u16PinNo = k_GpioConf.Compartment_Fan_Pin;
+            bWriteVal = true;
+            break;
         case DO_COMPARTMENT_FAN_LOW:
-            prv_GPIO_Write(k_GpioConf.Compartment_Fan_Pin, false, &u8Err);
-            return (u8Err == k_ErrNone);
-
+            u16PinNo = k_GpioConf.Compartment_Fan_Pin;
+            bWriteVal = false;
+            break;
         case DI_E_STOP_STATUS:
-            return (prv_GPIO_Read(k_GpioConf.EStop_Pin, &u8Err) != 0U);
-
+            u16PinNo = k_GpioConf.EStop_Pin;
+            bIsInputOp = true;
+            break;
         case DI_DOOR_LOCK_STATUS:
-            return (prv_GPIO_Read(k_GpioConf.DoorLock_Pin[u8DockNo], &u8Err) != 0U);
-
+            u16PinNo = k_GpioConf.DoorLock_Pin[u8DockNo];
+            bIsInputOp = true;
+            break;
         case DI_SOLENOID_LOCK_STATUS:
-            return (prv_GPIO_Read(k_GpioConf.SolenoidLock_Pin[u8DockNo], &u8Err) != 0U);
-
+            u16PinNo = k_GpioConf.SolenoidLock_Pin[u8DockNo];
+            bIsInputOp = true;
+            break;
         default:
             SYS_CONSOLE_PRINT("[GPIO] Unknown operation %u\r\n", (unsigned)eGPIOType);
             return false;
+    }
+
+    if (eGPIODirection == GPIO_READ)
+    {
+        /* Read operation: allowed for all pins */
+        return (prv_GPIO_Read(u16PinNo, &u8Err) != 0U) && (u8Err == k_ErrNone);
+    }
+    else
+    {
+        /* Write operation: only allowed for output pins */
+        if (bIsInputOp)
+        {
+            SYS_CONSOLE_PRINT("[GPIO] Write not allowed on input pin for op %u\r\n", (unsigned)eGPIOType);
+            return false;
+        }
+
+        /* Perform write */
+        if ((eGPIOType == DO_SOLENOID_HIGH) || (eGPIOType == DO_SOLENOID_LOW))
+        {
+            /* Special pulse for solenoid */
+            prv_GPIO_Write(u16PinNo, bWriteVal, &u8Err);
+            vTaskDelay(pdMS_TO_TICKS(SOLENOID_PULSE_MS));
+            prv_GPIO_Write(u16PinNo, false, &u8Err); /* Clear after pulse */
+        }
+        else
+        {
+            prv_GPIO_Write(u16PinNo, bWriteVal, &u8Err);
+        }
+        return (u8Err == k_ErrNone);
     }
 }
 
@@ -1416,7 +1456,12 @@ static void prv_SendResponsePayload(const uint8_t *pu8Payload, uint8_t u8Len)
     s_outbuf[u16Idx++] = (uint8_t)((u16CRC >> 8U) & 0xFFU);
     s_outbuf[u16Idx++] = (uint8_t)( u16CRC         & 0xFFU);
 
-    (void)TCPIP_TCP_ArrayPut(s_ioSocket, s_outbuf, u16Idx);
+    /*SYS_CONSOLE_PRINT("[TCP] Sending response: UID=0x%08X, Cmd=0x%02X, PayloadLen=%u\r\n",
+                      (unsigned)s_reqFrame.uniqueId,
+                      (unsigned)s_reqFrame.commandId,
+                      (unsigned)u8Len);*/
+    uint16_t u16Sent = TCPIP_TCP_ArrayPut(s_ioSocket, s_outbuf, u16Idx);
+    //SYS_CONSOLE_PRINT("[TCP] Sent %u bytes\r\n", (unsigned)u16Sent);
 }
 
 /**
@@ -1530,7 +1575,7 @@ static void prv_HandleGPIOCommand(void)
         {
             prv_GPIO_Write(u16PortNo, (bool)(u8PortVal != 0U), &u8ErrorCode);
         }
-        prv_StoreRelay_DigitalOutputsFrame();
+        // prv_StoreRelay_DigitalOutputsFrame();
     }
 
     uint8_t au8Resp[5];
@@ -1646,6 +1691,11 @@ static void prv_ParseAndProcessInbPacket(uint8_t *pu8Buf, uint16_t u16Len)
         return;
     }
 
+    if (s_reqFrame.compartmentId != COMPARTMENT_ID)
+    {
+        SYS_CONSOLE_PRINT("[TCP] Compartment mismatch got=%u expected=%u\r\n",
+                          (unsigned)s_reqFrame.compartmentId, (unsigned)COMPARTMENT_ID);
+    }
     /* CRC validation */
     uint16_t u16RxCRC   = ((uint16_t)pu8Buf[u16Len - 2U] << 8U) |
                            (uint16_t)pu8Buf[u16Len - 1U];
@@ -1665,9 +1715,9 @@ static void prv_ParseAndProcessInbPacket(uint8_t *pu8Buf, uint16_t u16Len)
         return;
     }
 
-    SYS_CONSOLE_PRINT("[TCP] Frame OK cmd=0x%02X dock=%u\r\n",
-                      (unsigned)s_reqFrame.commandId,
-                      (unsigned)s_reqFrame.dockId);
+    // SYS_CONSOLE_PRINT("[TCP] Frame OK cmd=0x%02X dock=%u\r\n",
+    //                   (unsigned)s_reqFrame.commandId,
+    //                   (unsigned)s_reqFrame.dockId);
 
     /* BUG FIX: declare u8DockNo outside switch to avoid C99 cross-jump issue */
     uint8_t u8DockNo = s_reqFrame.dockId;
@@ -1761,7 +1811,7 @@ static void prv_IOHandlerServerTask(void *pvParameters)
                                                       sizeof(au8IOBuffer));
             if (i16BytesRead > 0)
             {
-                SYS_CONSOLE_PRINT("[IO] Received %d bytes\r\n", (int)i16BytesRead);
+                // SYS_CONSOLE_PRINT("[IO] Received %d bytes\r\n", (int)i16BytesRead);
                 prv_ParseAndProcessInbPacket(au8IOBuffer, (uint16_t)i16BytesRead);
             }
 

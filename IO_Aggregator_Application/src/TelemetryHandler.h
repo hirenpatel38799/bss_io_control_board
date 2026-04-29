@@ -54,7 +54,6 @@ extern "C" {
  * Frame Constants
  * ========================================================================== */
 #define TELEMETRY_MSG_TYPE_BROADCAST    (0x0004U) /**< 2-byte message type field    */
-#define TELEMETRY_COMPARTMENT_ID        (0x01U)   /**< Fixed compartment identifier */
 
 /**
  * @brief Frame header layout (bytes before payload):
