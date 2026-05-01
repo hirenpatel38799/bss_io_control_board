@@ -265,6 +265,7 @@ typedef struct __attribute__((packed))
     /* Digital inputs — per dock */
     uint8_t DoorLock_Pin[MAX_DOCKS];
     uint8_t SolenoidLock_Pin[MAX_DOCKS];
+    uint8_t IgnitionSence_Pin[MAX_DOCKS];
     /* Digital inputs — global */
     uint8_t EStop_Pin;
 } Board_gpio_st;
@@ -297,6 +298,7 @@ typedef enum
     DI_E_STOP_STATUS,
     DI_DOOR_LOCK_STATUS,
     DI_SOLENOID_LOCK_STATUS,
+    DI_BP_STATUS,
     GPIO_OPERATION_MAX           /**< Sentinel — not a valid operation        */
 } GPIOOperation_e;
 

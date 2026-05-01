@@ -428,7 +428,7 @@ void vProcessPMCanMessage(CAN_RX_BUFFER *rxBuf, uint8_t canBus)
 
     /* Record the time of the last valid PM frame (for timeout detection) */
     SESSION_SetPMLastRxTime(u8DockNo, xTaskGetTickCount());
-
+    // SYS_CONSOLE_PRINT("Dock %u : Last Rx Tick %d\r\n",u8DockNo, SESSION_GetPMLastRxTime(u8DockNo));
     /* Validate CAN ID before decoding payload */
     if (!bIsValidPMCanID(rxBuf->id))
     {

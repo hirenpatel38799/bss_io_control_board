@@ -213,6 +213,7 @@ static const Board_gpio_st k_GpioConf = {
     .Compartment_Fan_Pin = 85,
     .DoorLock_Pin       = {0,  1,  2,  3},
     .SolenoidLock_Pin   = {0,  4,  5,  6},
+    .IgnitionSence_Pin  = {0,  8,  9,  10},
     .EStop_Pin          = 7
 };
 
@@ -757,78 +758,96 @@ static void prv_StoreRelay_DigitalOutputsFrame(void)
  */
 void ReadAllAnalogInputPins(void)
 {
-    static const ADC_CORE_NUM k_AdcCores[ALL_ANALOG_PINS] = {
-        ADC_CORE_NUM2, ADC_CORE_NUM2, ADC_CORE_NUM0, ADC_CORE_NUM0,
-        ADC_CORE_NUM0, ADC_CORE_NUM1, ADC_CORE_NUM0, ADC_CORE_NUM1,
-        ADC_CORE_NUM1, ADC_CORE_NUM0, ADC_CORE_NUM1, ADC_CORE_NUM0,
-        ADC_CORE_NUM3, ADC_CORE_NUM3, ADC_CORE_NUM2, ADC_CORE_NUM2,
-        ADC_CORE_NUM3, ADC_CORE_NUM3, ADC_CORE_NUM3, ADC_CORE_NUM3
-    };
-    static const ADC_CHANNEL_NUM k_AdcChannels[ALL_ANALOG_PINS] = {
-        ADC_CH5, ADC_CH4, ADC_CH5, ADC_CH2,
-        ADC_CH0, ADC_CH4, ADC_CH7, ADC_CH0,
-        ADC_CH5, ADC_CH4, ADC_CH2, ADC_CH1,
-        ADC_CH0, ADC_CH1, ADC_CH3, ADC_CH2,
-        ADC_CH4, ADC_CH5, ADC_CH2, ADC_CH3
-    };
+    /* Logging every 100 cycles */
+    static uint8_t logCounter = 0;
+    logCounter++;
 
-    volatile uint32_t au32AdcData[ALL_ANALOG_PINS];
-    const float k_InvAdcMax = 1.0F / 4095.0F;
-
-    RTC_Timer32Start();
-    ADC_GlobalEdgeConversionStart();
-
-    /* BUG FIX: timeout guard on ADC busy-wait */
-    uint32_t u32Timeout = ADC_TIMEOUT_CYCLES;
-    while ((!ADC_CORE_INT_EOSRDY) && (u32Timeout > 0U))
+    if (logCounter >= 100)
     {
-        u32Timeout--;
-    }
-    if (u32Timeout == 0U)
-    {
-        SYS_CONSOLE_PRINT("[ADC] Conversion timeout\r\n");
-        return;
-    }
+        static const ADC_CORE_NUM k_AdcCores[ALL_ANALOG_PINS] = {
+            ADC_CORE_NUM2, ADC_CORE_NUM2, ADC_CORE_NUM0, ADC_CORE_NUM0,
+            ADC_CORE_NUM0, ADC_CORE_NUM1, ADC_CORE_NUM0, ADC_CORE_NUM1,
+            ADC_CORE_NUM1, ADC_CORE_NUM0, ADC_CORE_NUM1, ADC_CORE_NUM0,
+            ADC_CORE_NUM3, ADC_CORE_NUM3, ADC_CORE_NUM2, ADC_CORE_NUM2,
+            ADC_CORE_NUM3, ADC_CORE_NUM3, ADC_CORE_NUM3, ADC_CORE_NUM3};
+        static const ADC_CHANNEL_NUM k_AdcChannels[ALL_ANALOG_PINS] = {
+            ADC_CH5, ADC_CH4, ADC_CH5, ADC_CH2,
+            ADC_CH0, ADC_CH4, ADC_CH7, ADC_CH0,
+            ADC_CH5, ADC_CH4, ADC_CH2, ADC_CH1,
+            ADC_CH0, ADC_CH1, ADC_CH3, ADC_CH2,
+            ADC_CH4, ADC_CH5, ADC_CH2, ADC_CH3};
 
-    for (uint8_t i = 0U; i < (uint8_t)ALL_ANALOG_PINS; i++)
-    {
-        au32AdcData[i] = ADC_ResultGet(k_AdcCores[i], k_AdcChannels[i]);
-        uint16_t u16Avg = MovingAverage_Update(i, (uint16_t)au32AdcData[i]);
+        volatile uint32_t au32AdcData[ALL_ANALOG_PINS];
+        const float k_InvAdcMax = 1.0F / 4095.0F;
+
+        RTC_Timer32Start();
+        ADC_GlobalEdgeConversionStart();
+
+        /* BUG FIX: timeout guard on ADC busy-wait */
+        uint32_t u32Timeout = ADC_TIMEOUT_CYCLES;
+        while ((!ADC_CORE_INT_EOSRDY) && (u32Timeout > 0U))
+        {
+            u32Timeout--;
+        }
+        if (u32Timeout == 0U)
+        {
+            SYS_CONSOLE_PRINT("[ADC] Conversion timeout\r\n");
+            return;
+        }
+
+        for (uint8_t i = 0U; i < (uint8_t)ALL_ANALOG_PINS; i++)
+        {
+            au32AdcData[i] = ADC_ResultGet(k_AdcCores[i], k_AdcChannels[i]);
+            uint16_t u16Avg = MovingAverage_Update(i, (uint16_t)au32AdcData[i]);
 
 #if PT100_Sensor
-        float fVoltage = (float)u16Avg * k_Vref * k_InvAdcMax;
+            float fVoltage = (float)u16Avg * k_Vref * k_InvAdcMax;
 #else
-        float fVoltage = (float)u16Avg * ADC_VREF * k_InvAdcMax;
+            float fVoltage = (float)u16Avg * ADC_VREF * k_InvAdcMax;
 #endif
 
-        if (i < (uint8_t)NUM_TEMPERATURE_ANALOG_PINS)
-        {
-            float fTemp;
+            if (i < (uint8_t)NUM_TEMPERATURE_ANALOG_PINS)
+            {
+                float fTemp;
 #if defined(PT100_Sensor) && (PT100_Sensor == 1)
-            fTemp = prv_TempCalcPT100(fVoltage);
+                fTemp = prv_TempCalcPT100(fVoltage);
 #elif defined(NTC_Sensor) && (NTC_Sensor == 1)
-            fTemp = prv_TempCalcNTC(fVoltage);
+                fTemp = prv_TempCalcNTC(fVoltage);
 #else
-            fTemp = (float)u16Avg;
+                fTemp = (float)u16Avg;
 #endif
-            /* Store as fixed-point (0.01 °C units) */
-            float fFixed = fTemp * 100.0F;
-            if (fFixed < 0.0F) { fFixed = 0.0F; }
-            currentTempAIQueueBuffer[i] = (uint16_t)fFixed;
+                /* Store as fixed-point (0.01 °C units) */
+                float fFixed = fTemp * 100.0F;
+                if (fFixed < 0.0F)
+                {
+                    fFixed = 0.0F;
+                }
+                currentTempAIQueueBuffer[i] = (uint16_t)fFixed;
+            }
+            else
+            {
+                float fScaled = fVoltage * 100.0F;
+                if (fScaled < 0.0F)
+                {
+                    fScaled = 0.0F;
+                }
+                currentAIQueueBuffer[i - (uint8_t)NUM_TEMPERATURE_ANALOG_PINS] = (uint16_t)fScaled;
+            }
         }
-        else
-        {
-            float fScaled = fVoltage * 100.0F;
-            if (fScaled < 0.0F) { fScaled = 0.0F; }
-            currentAIQueueBuffer[i - (uint8_t)NUM_TEMPERATURE_ANALOG_PINS] = (uint16_t)fScaled;
-        }
-    }
 
-    /* Update session DB temperatures — convert back to °C */
-    SESSION_SetDockTemperature((uint8_t)DOCK_1,       (uint8_t)(currentTempAIQueueBuffer[6])); // Chennel 6 is DOCK_1, Channel 7 is DOCK_2, Channel 8 is DOCK_3, Channel 9 is COMPARTMENT
-    SESSION_SetDockTemperature((uint8_t)DOCK_2,       (uint8_t)(currentTempAIQueueBuffer[7]));
-    SESSION_SetDockTemperature((uint8_t)DOCK_3,       (uint8_t)(currentTempAIQueueBuffer[8]));
-    SESSION_SetDockTemperature((uint8_t)COMPARTMENT,  (uint8_t)(currentTempAIQueueBuffer[9]));
+        /* Update session DB temperatures — convert back to °C */
+        SESSION_SetDockTemperature((uint8_t)DOCK_1, (uint8_t)(currentTempAIQueueBuffer[6]/100)); // Channel 6 is DOCK_1, Channel 7 is DOCK_2, Channel 8 is DOCK_3, Channel 9 is COMPARTMENT
+        SESSION_SetDockTemperature((uint8_t)DOCK_2, (uint8_t)(currentTempAIQueueBuffer[7] / 100));
+        SESSION_SetDockTemperature((uint8_t)DOCK_3, (uint8_t)(currentTempAIQueueBuffer[8] / 100));
+        SESSION_SetDockTemperature((uint8_t)COMPARTMENT, (uint8_t)(currentTempAIQueueBuffer[9] / 100));
+
+        SYS_CONSOLE_PRINT("Temps -> D1:%d D2:%d D3:%d COMP:%d\r\n",
+                          (uint16_t)(currentTempAIQueueBuffer[6]),
+                          (uint16_t)(currentTempAIQueueBuffer[7]),
+                          (uint16_t)(currentTempAIQueueBuffer[8]),
+                          (uint16_t)(currentTempAIQueueBuffer[9]));
+        logCounter = 0;
+    }
 }
 
 /* ============================================================================
@@ -1301,6 +1320,10 @@ bool bGPIO_Operation(GPIOOperation_e eGPIOType, uint8_t u8DockNo, GPIO_Direction
             break;
         case DI_SOLENOID_LOCK_STATUS:
             u16PinNo = k_GpioConf.SolenoidLock_Pin[u8DockNo];
+            bIsInputOp = true;
+            break;
+        case DI_BP_STATUS:
+            u16PinNo = k_GpioConf.IgnitionSence_Pin[u8DockNo];
             bIsInputOp = true;
             break;
         default:

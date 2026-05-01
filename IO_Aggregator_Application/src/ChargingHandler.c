@@ -911,10 +911,10 @@ static void Charging_StateMachine(uint8_t u8DockNo)
  */
 static void vUpdateVehiclePMInfo(uint8_t u8DockNo)
 {
-    if (SESSION_GetChargingState(u8DockNo) != CH_STATE_CHARGING)
-    {
-        return;
-    }
+    // if (SESSION_GetChargingState(u8DockNo) != CH_STATE_CHARGING)
+    // {
+    //     return;
+    // }
 
 #if (CHARGING_PROTOCOL == PROTOCOL_17017_25)
     ChargingMsgFrameInfo_t sFrame = {0};
@@ -1295,6 +1295,7 @@ static bool bCheckPMStatus(uint8_t u8DockNo)
     CH_State_e eState         = SESSION_GetChargingState(u8DockNo);
     uint32_t u32ElapsedMs     = (u32CurrentTick - u32LastPMRxTick);
 
+    // SYS_CONSOLE_PRINT("@1 Dock %u : Last Rx Tick %d\r\n",u8DockNo, SESSION_GetPMLastRxTime(u8DockNo));
     if (u32ElapsedMs >= PM_COMMS_TIMEOUT_MS)
     {
         if (SESSION_GetPMRxStatus(u8DockNo) == true)
@@ -1512,7 +1513,7 @@ static void updateSystemState(uint8_t u8DockNo)
         {
         case CH_STATE_INIT:
             vSetLedState(u8DockNo, LED_BLUE, LED_STATE_BLINK);
-            SESSION_ResetBMSData(u8DockNo);
+            // SESSION_ResetBMSData(u8DockNo);
             break;
 
         case CH_STATE_AUTH_SUCCESS:
@@ -1757,7 +1758,7 @@ void vDummyDataUpdate(uint8_t u8DockNo)
     float fCurrent = 40.0f + u8DockNo;
     uint16_t u16FaultInfo = 0; // No faults in dummy data
     static uint8_t u8Counter = 0;
-    if (bGPIO_Operation(DO_AC_RELAY_ON, u8DockNo, GPIO_READ) == true)
+    if (bGPIO_Operation(DI_BP_STATUS, u8DockNo, GPIO_READ) == true)
     {
         TVS_MsgFrameInfo_t sFrame = {0};
         (void)bGetSetTVSBMSData(u8DockNo, &sFrame, GET_PARA);
