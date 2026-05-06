@@ -714,9 +714,10 @@ void SYS_Initialize ( void* data )
     /* MISRAC 2012 deviation block start */
     /* MISRA C-2012 Rule 2.2 deviated in this file.  Deviation record ID -  H3_MISRAC_2012_R_2_2_DR_1 */
     FCW_Initialize();
+   
+     /* Small delay for pin stabilization */
+    for (volatile uint32_t i = 0; i < 50000U; i++);
 
-    PORT_Initialize();
-    
     FCW_InitializeBootFlag(); //flag is initialized
         
     uint32_t bootFlagVal = FCW_ReadBootFlag();
@@ -743,7 +744,9 @@ void SYS_Initialize ( void* data )
             // TODO: Optionally handle invalid boot flag scenario
         }
     }
-
+    
+    PORT_Initialize();
+    
     CLOCK_Initialize();
 
     FCW_Initialize();
@@ -793,6 +796,6 @@ void SYS_Initialize ( void* data )
 
 
     NVIC_Initialize();
-
+    SYS_CONSOLE_PRINT("Boot flag is FALSE or invalid. Staying in bootloader. %d\n", bootFlagVal);
     /* MISRAC 2012 deviation block end */
 }

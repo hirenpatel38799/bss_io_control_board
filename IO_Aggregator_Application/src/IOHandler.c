@@ -960,7 +960,7 @@ static void prv_SetStaticIPAddress(const char *pcIpStr)
     (void)TCPIP_DHCP_Disable(hNet);
 
     IPV4_ADDR sIp, sMask;
-    static const char k_SubnetMask[] = "255.255.0.0";
+    static const char k_SubnetMask[] = "255.255.255.0";
 
     if (!TCPIP_Helper_StringToIPAddress(pcIpStr, &sIp))
     {
@@ -1814,7 +1814,7 @@ static void prv_IOHandlerServerTask(void *pvParameters)
     s_ioSocket = TCPIP_TCP_ServerOpen(IP_ADDRESS_TYPE_IPV4, IO_SERVER_PORT_HEV, 0U);
     if (s_ioSocket == INVALID_SOCKET)
     {
-        SYS_CONSOLE_PRINT("[IO] Failed to open TCP socket — task exiting\r\n");
+        SYS_CONSOLE_PRINT("[IO] Failed to open TCP socket task exiting\r\n");
         vTaskDelete(NULL);
         return;
     }

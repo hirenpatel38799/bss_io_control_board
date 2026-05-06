@@ -1154,10 +1154,10 @@ void SYS_Initialize ( void* data )
 
     CLOCK_Initialize();
 
-
-
-
     FCW_Initialize();
+
+    /* Small delay for pin stabilization */
+    for (volatile uint32_t i = 0; i < 50000U; i++);
 
     RTC_Initialize();
 
