@@ -120,7 +120,7 @@ bool bGetSetLevdcBMSData(uint8_t u8DockNo,
 {
     bool bRet = false;
 
-    if ((psData == NULL) || (u8DockNo >= MAX_DOCKS))
+    if ((psData == NULL) || (u8DockNo > SESSION_GetMaxDocks()))
     {
         return false;
     }
@@ -180,7 +180,7 @@ bool bGetSetTVSBMSData(uint8_t u8DockNo,
 {
     bool bRet = false;
 
-    if ((psData == NULL) || (u8DockNo >= MAX_DOCKS))
+    if ((psData == NULL) || (u8DockNo > SESSION_GetMaxDocks()))
     {
         return false;
     }
@@ -1578,7 +1578,7 @@ static void CHARGING_TASK(void *pvParameters)
 
     for (;;)
     {
-        for (uint8_t u8DockNo = DOCK_1; u8DockNo < MAX_DOCKS; u8DockNo++)
+        for (uint8_t u8DockNo = DOCK_1; u8DockNo <= SESSION_GetMaxDocks(); u8DockNo++)
         {
             vDummyDataUpdate(u8DockNo); // Simulate BMS/PM data for testing
             vChargingProcessHandler(u8DockNo);
@@ -1749,7 +1749,7 @@ bool ChargingTask_Init(void)
 
 void vDummyDataUpdate(uint8_t u8DockNo)
 {
-    if (COMPARTMENT_ID == 1)
+    if (SESSION_GetCompartmentId() == 1)
     {
         return;
     }

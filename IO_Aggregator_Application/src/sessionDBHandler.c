@@ -55,7 +55,7 @@ SESSION_Data_t sessionDB[MAX_DOCKS];
  */
 void SESSION_ResetPMData(uint8_t idx)
 {
-    if (idx >= MAX_DOCKS)
+    if (idx > SESSION_GetMaxDocks())
     {
         return; /* Guard against invalid index */
     }
@@ -81,7 +81,7 @@ void SESSION_ResetPMData(uint8_t idx)
  */
 void SESSION_ResetBMSData(uint8_t idx)
 {
-    if (idx >= MAX_DOCKS)
+    if (idx > SESSION_GetMaxDocks())
     {
         return;
     }
@@ -102,7 +102,7 @@ void SESSION_ResetBMSData(uint8_t idx)
  */
 void SESSION_ResetTempData(uint8_t idx)
 {
-    if (idx >= MAX_DOCKS)
+    if (idx > SESSION_GetMaxDocks())
     {
         return;
     }
@@ -126,7 +126,7 @@ void SESSION_ResetTempData(uint8_t idx)
  */
 void SESSION_ResetSession(uint8_t idx)
 {
-    if (idx >= MAX_DOCKS)
+    if (idx > SESSION_GetMaxDocks())
     {
         return;
     }
@@ -149,7 +149,7 @@ void SESSION_ResetSession(uint8_t idx)
  */
 void SESSION_ResetAll(void)
 {
-    for (uint8_t idx = 0U; idx < (uint8_t)MAX_DOCKS; idx++)
+    for (uint8_t idx = 0U; idx <= (uint8_t)SESSION_GetMaxDocks(); idx++)
     {
         SESSION_ResetSession(idx);
     }

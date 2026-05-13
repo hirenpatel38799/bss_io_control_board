@@ -108,12 +108,10 @@ extern "C" {
 /**
  * Temperature payload byte count:
  *   u8CompartmentTemperature 1
- *   u8Dock1Temperature       1
- *   u8Dock2Temperature       1
- *   u8Dock3Temperature       1
- *                          = 4 bytes
+ *   u8DockTemperature[MAX_DOCKS]       1
+ *                          = 7 bytes
  */
-#define TELEMETRY_TEMP_PAYLOAD_SIZE     (4U)
+#define TELEMETRY_TEMP_PAYLOAD_SIZE     (7U)
 
 /**
  * Maximum frame buffer size — header + largest payload + CRC
@@ -170,9 +168,7 @@ typedef struct __attribute__((packed))
 typedef struct __attribute__((packed))
 {
     uint8_t u8CompartmentTemperature; /**< Enclosure temperature (°C)        */
-    uint8_t u8Dock1Temperature;       /**< Dock 1 temperature (°C)           */
-    uint8_t u8Dock2Temperature;       /**< Dock 2 temperature (°C)           */
-    uint8_t u8Dock3Temperature;       /**< Dock 3 temperature (°C)           */
+    uint8_t u8DockTemperature[MAX_DOCKS];       /**< Dock temperature (°C)           */
 } TELEMETRY_TempData_t;
 
 /**

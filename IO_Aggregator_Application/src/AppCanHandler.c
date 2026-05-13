@@ -1,44 +1,50 @@
 /*******************************************************************************
  * File Name   : AppCanHandler.c
  * Company     : Bacancy
- * Summary     : CAN communication handler — implementation
+ * Summary     : CAN communication handler — scalable implementation
  *
  * Description :
- *   Implements three-channel CAN communication (CAN0, CAN1, CAN2) with
- *   independent FreeRTOS RX/TX queues and dedicated handler tasks.
+ *   Implements up to CANBUS_MAX (6) CAN channels with independent FreeRTOS
+ *   SW RX/TX queues and dedicated handler tasks.
  *
- *   Architecture per channel:
- *     RX Handler Task  → polls hardware FIFO → pushes to RX queue
- *     Server Task      → dequeues TX → sends to hardware
- *                      → dequeues RX → dispatches to protocol handler
+ *   The number of channels initialised at runtime equals:
+ *       u8ActiveChannels = min(SESSION_GetMaxDocks(), CAN_MAX_HW_CHANNELS)
  *
- * Version     : 2.0
+ *   All previously hardcoded 3-channel patterns have been replaced with:
+ *     - s_canHwOps[]  : compile-time function-pointer table for all HAL ops.
+ *     - s_canRxBuf[]  : statically allocated staging buffer per channel.
+ *     - Runtime loops : 0 … u8ActiveChannels-1 everywhere.
  *
- * Changes from v1.0:
- *   - Eliminated code duplication: RX handler and server task logic unified
- *     into generic helpers parameterised by channel index
- *   - Removed dead/commented-out code (old vCan0RxHandlerTask variants)
- *   - Fixed: `static CAN_TX_BUFFER txBuffer` in CAN_Write was not
- *     re-entrant safe — replaced with local stack variable
- *   - Fixed: `char i8len` parameter in CAN_Write (signed, could be negative)
- *     → changed to `uint8_t u8Len` with matching guard
- *   - Fixed: inconsistent TX queue wait timeout (0 vs pdMS_TO_TICKS(5))
- *     across server tasks — unified to non-blocking (0) for TX dequeue
- *   - Fixed: `vCanHandlerInit` returned void but had no way to signal failure
- *     → now returns bool; caller can assert/halt
- *   - Fixed: queue/task handles not checked for NULL before use in tasks
- *   - Fixed: `vDisplayCanRxMessage` used `rxBufLen` parameter but never used
- *     it — removed misleading parameter
- *   - Fixed: macro names `WRITE_ID`/`READ_ID` were too generic — renamed to
- *     `CAN_WRITE_ID`/`CAN_READ_ID` to avoid namespace collisions
- *   - Fixed: `u32CanId` computed in `vProcessCanRxMessage` but never used
- *   - Fixed: guard macro had reserved leading underscore (`_APP_CAN_HANDLER_H`)
- *   - Improved: queue/task arrays replace 6 separate handles → scalable
- *   - Improved: `vCanHandlerInit` validates all resources before starting tasks
- *   - Improved: CAN_IsRxOK and vDisplayCanErrorStatus promoted to file-scope
- *     static inline / static with proper forward declarations
- *   - Improved: all magic numbers replaced with named constants
- *   - Improved: complete Doxygen on every function
+ *   To add a 7th CAN channel:
+ *     1. Add CANBUS_6 to CANBus_e in sessionDBHandler.h.
+ *     2. Add a message RAM buffer: Can6MessageRAM[].
+ *     3. Add one CAN_HwOps_t entry to s_canHwOps[].
+ *     4. Update CAN_MAX_HW_CHANNELS if the header macro is used instead of
+ *        the enum sentinel.
+ *     No logic changes needed elsewhere.
+ *
+ * Version     : 4.0
+ *
+ * Bug fixes inherited from v3.0 (all preserved):
+ *   BUG-1  Server task now drains entire SW RX queue per cycle.
+ *   BUG-2  Server task now drains entire SW TX queue per cycle.
+ *   BUG-3  CAN_Write() auto-detects standard vs extended by ID value.
+ *   BUG-4  All locals zero-initialised before the hardware switch.
+ *   BUG-5  vDisplayCanRxMessage uses CAN_GetFrameId() — correct ID display.
+ *   BUG-6  CAN_IsRxOK() accepts LEC==7 (no change after reset).
+ *
+ * New changes in v4.0:
+ *   REMOVED  Three hardcoded CAN_MessageRAMConfigSet calls.
+ *   REMOVED  Per-channel switch-case chains in RX drain / server / CAN_Write.
+ *   REMOVED  Separate CAN0_Write / CAN1_Write / CAN2_Write functions — replaced
+ *            by unified CAN_WriteStruct(u8Channel, pBuf).
+ *   REMOVED  Dock→channel switch-case — replaced by arithmetic mapping.
+ *   ADDED    s_canHwOps[CANBUS_MAX] — HAL function-pointer table.
+ *   ADDED    s_canRxBuf[CANBUS_MAX] — per-channel staging buffer array.
+ *   ADDED    s_u8ActiveChannels     — runtime active channel count.
+ *   ADDED    CAN_GetActiveChannels(), CAN_GetChannelCount(), CAN_GetStats().
+ *   ADDED    prv_LaunchRxTask() / prv_LaunchServerTask() — single task entry
+ *            point for all channels, channel index passed as task parameter.
  *******************************************************************************/
 
 /* ============================================================================
@@ -46,14 +52,13 @@
  * ========================================================================== */
 #include <stddef.h>
 #include <stdbool.h>
-#include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include "definitions.h"
 #include "AppCanHandler.h"
 
 /* ============================================================================
  * Debug Control
- * Set CAN_DEBUG_ENABLE to 1 to enable verbose CAN debug output.
  * ========================================================================== */
 #define CAN_DEBUG_ENABLE    (0)
 
@@ -64,27 +69,20 @@
 #endif
 
 /* ============================================================================
- * Internal Configuration
+ * Timing Configuration (unchanged from v3.0)
  * ========================================================================== */
-
-/** Task polling delay — balance CPU usage vs. latency (ms) */
-#define CAN_RX_POLL_DELAY_MS        (5U)
-
-/** Server task cycle delay (ms) */
+#define CAN_RX_POLL_DELAY_MS        (2U)
 #define CAN_SERVER_TASK_DELAY_MS    (10U)
-
-/** Queue send timeout for RX path (ms) — non-zero to allow brief back-pressure */
 #define CAN_RX_QUEUE_TIMEOUT_MS     (5U)
 
-/** Queue receive timeout for TX dequeue — non-blocking, return immediately */
-#define CAN_TX_DEQUEUE_TIMEOUT_MS   (0U)
-
-/** Queue receive timeout for RX dequeue — non-blocking */
-#define CAN_RX_DEQUEUE_TIMEOUT_MS   (0U)
-
 /* ============================================================================
- * CAN Message RAM — placed in dedicated linker sections
- * CACHE_ALIGN ensures correct alignment for DMA access.
+ * CAN Message RAM Buffers
+ *
+ * One buffer per supported channel. Placed in dedicated linker sections so
+ * the linker script can locate them in the MCAN peripheral's RAM region.
+ *
+ * Only the buffers for active channels are passed to the HAL.
+ * Unused buffers waste no RAM if the linker section is in a separate region.
  * ========================================================================== */
 uint8_t CACHE_ALIGN
     __attribute__((space(data), section(".can0_message_ram")))
@@ -98,53 +96,181 @@ uint8_t CACHE_ALIGN
     __attribute__((space(data), section(".can2_message_ram")))
     Can2MessageRAM[CAN2_MESSAGE_RAM_CONFIG_SIZE];
 
-/* ============================================================================
- * FreeRTOS Queue Handle Arrays
- * Index matches CanBusChannel_e: [0]=CAN0, [1]=CAN1, [2]=CAN2
- * ========================================================================== */
-QueueHandle_t xCANRXQueueHandler[CAN_NUM_CHANNELS];
-QueueHandle_t xCANTXQueueHandler[CAN_NUM_CHANNELS];
+uint8_t CACHE_ALIGN
+    __attribute__((space(data), section(".can3_message_ram")))
+    Can3MessageRAM[CAN3_MESSAGE_RAM_CONFIG_SIZE];
+
+uint8_t CACHE_ALIGN
+    __attribute__((space(data), section(".can4_message_ram")))
+    Can4MessageRAM[CAN4_MESSAGE_RAM_CONFIG_SIZE];
+
+uint8_t CACHE_ALIGN
+    __attribute__((space(data), section(".can5_message_ram")))
+    Can5MessageRAM[CAN5_MESSAGE_RAM_CONFIG_SIZE];
 
 /* ============================================================================
- * Static RX Hardware Buffers
- * One buffer array per CAN channel, sized to hardware FIFO depth.
+ * Public Queue Handles and Statistics Arrays
+ * Sized to the hardware maximum. Only indices [0 … u8ActiveChannels-1] are
+ * valid after vCanHandlerInit() completes.
  * ========================================================================== */
-static CAN_RX_BUFFER s_can0RxBuffer[CAN0_RX_FIFO0_SIZE];
-static CAN_RX_BUFFER s_can1RxBuffer[CAN1_RX_FIFO0_SIZE];
-static CAN_RX_BUFFER s_can2RxBuffer[CAN2_RX_FIFO0_SIZE];
+QueueHandle_t      xCANRXQueueHandler[CAN_MAX_HW_CHANNELS];
+QueueHandle_t      xCANTXQueueHandler[CAN_MAX_HW_CHANNELS];
+CAN_ChannelStats_t xCANStats[CAN_MAX_HW_CHANNELS];
+
+/* ============================================================================
+ * Private: Active Channel Count
+ * Set once by vCanHandlerInit(). Read via CAN_GetActiveChannels().
+ * ========================================================================== */
+static uint8_t s_u8ActiveChannels = 0U;
+
+/* ============================================================================
+ * Private: Per-Channel RX Staging Buffers
+ *
+ * One element per supported channel. Each RX drain task owns its own buffer
+ * exclusively — no mutex needed.
+ * ========================================================================== */
+static CAN_RX_BUFFER s_canRxBuf[CAN_MAX_HW_CHANNELS];
+
+/* ============================================================================
+ * Hardware Operations Table  (THE single place that names hardware)
+ *
+ * s_canHwOps[i] holds all HAL function pointers and RAM info for channel i.
+ * The generic task bodies call ops->pfXxx() instead of switching on the
+ * channel index, so no switch-case exists anywhere in the logic layer.
+ *
+ * To add a new channel:
+ *   1. Add its entry here.
+ *   2. Add its message RAM buffer above.
+ *   Done.
+ * ========================================================================== */
+static const CAN_HwOps_t s_canHwOps[CAN_MAX_HW_CHANNELS] =
+{
+    /* ---- CAN0 ---- */
+    {
+        .pcName       = "CAN0",
+        .pu8MessageRAM = Can0MessageRAM,
+        .u32RamSize   = CAN0_MESSAGE_RAM_CONFIG_SIZE,
+        .pfRamConfig  = CAN0_MessageRAMConfigSet,
+        .pfIntGet     = CAN0_InterruptGet,
+        .pfIntClear   = CAN0_InterruptClear,
+        .pfErrorGet   = CAN0_ErrorGet,
+        .pfFifoFill   = CAN0_RxFifoFillLevelGet,
+        .pfRxFifo     = CAN0_MessageReceiveFifo,
+        .pfTxFifo     = CAN0_MessageTransmitFifo,
+    },
+    /* ---- CAN1 ---- */
+    {
+        .pcName       = "CAN1",
+        .pu8MessageRAM = Can1MessageRAM,
+        .u32RamSize   = CAN1_MESSAGE_RAM_CONFIG_SIZE,
+        .pfRamConfig  = CAN1_MessageRAMConfigSet,
+        .pfIntGet     = CAN1_InterruptGet,
+        .pfIntClear   = CAN1_InterruptClear,
+        .pfErrorGet   = CAN1_ErrorGet,
+        .pfFifoFill   = CAN1_RxFifoFillLevelGet,
+        .pfRxFifo     = CAN1_MessageReceiveFifo,
+        .pfTxFifo     = CAN1_MessageTransmitFifo,
+    },
+    /* ---- CAN2 ---- */
+    {
+        .pcName       = "CAN2",
+        .pu8MessageRAM = Can2MessageRAM,
+        .u32RamSize   = CAN2_MESSAGE_RAM_CONFIG_SIZE,
+        .pfRamConfig  = CAN2_MessageRAMConfigSet,
+        .pfIntGet     = CAN2_InterruptGet,
+        .pfIntClear   = CAN2_InterruptClear,
+        .pfErrorGet   = CAN2_ErrorGet,
+        .pfFifoFill   = CAN2_RxFifoFillLevelGet,
+        .pfRxFifo     = CAN2_MessageReceiveFifo,
+        .pfTxFifo     = CAN2_MessageTransmitFifo,
+    },
+    /* ---- CAN3 ---- */
+    {
+        .pcName       = "CAN3",
+        .pu8MessageRAM = Can3MessageRAM,
+        .u32RamSize   = CAN3_MESSAGE_RAM_CONFIG_SIZE,
+        .pfRamConfig  = CAN3_MessageRAMConfigSet,
+        .pfIntGet     = CAN3_InterruptGet,
+        .pfIntClear   = CAN3_InterruptClear,
+        .pfErrorGet   = CAN3_ErrorGet,
+        .pfFifoFill   = CAN3_RxFifoFillLevelGet,
+        .pfRxFifo     = CAN3_MessageReceiveFifo,
+        .pfTxFifo     = CAN3_MessageTransmitFifo,
+    },
+    /* ---- CAN4 ---- */
+    {
+        .pcName       = "CAN4",
+        .pu8MessageRAM = Can4MessageRAM,
+        .u32RamSize   = CAN4_MESSAGE_RAM_CONFIG_SIZE,
+        .pfRamConfig  = CAN4_MessageRAMConfigSet,
+        .pfIntGet     = CAN4_InterruptGet,
+        .pfIntClear   = CAN4_InterruptClear,
+        .pfErrorGet   = CAN4_ErrorGet,
+        .pfFifoFill   = CAN4_RxFifoFillLevelGet,
+        .pfRxFifo     = CAN4_MessageReceiveFifo,
+        .pfTxFifo     = CAN4_MessageTransmitFifo,
+    },
+    /* ---- CAN5 ---- */
+    {
+        .pcName       = "CAN5",
+        .pu8MessageRAM = Can5MessageRAM,
+        .u32RamSize   = CAN5_MESSAGE_RAM_CONFIG_SIZE,
+        .pfRamConfig  = CAN5_MessageRAMConfigSet,
+        .pfIntGet     = CAN5_InterruptGet,
+        .pfIntClear   = CAN5_InterruptClear,
+        .pfErrorGet   = CAN5_ErrorGet,
+        .pfFifoFill   = CAN5_RxFifoFillLevelGet,
+        .pfRxFifo     = CAN5_MessageReceiveFifo,
+        .pfTxFifo     = CAN5_MessageTransmitFifo,
+    },
+};
 
 /* ============================================================================
  * External Protocol Dispatch Functions
- * Implemented in BMS/PM handler modules.
  * ========================================================================== */
-extern void vProcessBMSCanMessage(CAN_RX_BUFFER *rxBuf, uint8_t canBus);
-extern void vProcessPMCanMessage(CAN_RX_BUFFER  *rxBuf, uint8_t canBus);
+extern void vProcessBMSCanMessage(CAN_RX_BUFFER *pRxBuf, uint8_t u8CanBus);
+extern void vProcessPMCanMessage(CAN_RX_BUFFER  *pRxBuf, uint8_t u8CanBus);
 
 /* ============================================================================
  * Private Function Declarations
  * ========================================================================== */
-static inline bool  CAN_IsRxOK(uint32_t status);
-static void         vDisplayCanErrorStatus(uint32_t status, const char *canName);
-static void         vDisplayCanRxMessage(const CAN_RX_BUFFER *rxBuf);
-static void         vProcessCanRxMessage(CAN_RX_BUFFER *rxBuf, uint8_t canBus);
-static void         vCanRxHandlerTask_Generic(uint8_t u8Channel,
-                                              CAN_RX_BUFFER *pRxBuf,
-                                              uint8_t u8FifoSize,
-                                              QueueHandle_t xRxQueue,
-                                              const char *pcName);
-static void         vCanServerTask_Generic(uint8_t u8Channel,
-                                           QueueHandle_t xTxQueue,
-                                           QueueHandle_t xRxQueue);
+static inline bool CAN_IsRxOK(uint32_t u32Status);
+static void        vDisplayCanErrorStatus(uint32_t u32Status, const char *pcName);
+static void        vDisplayCanRxMessage(const CAN_RX_BUFFER *pRxBuf);
+static void        vProcessCanRxMessage(CAN_RX_BUFFER *pRxBuf, uint8_t u8CanBus);
+static inline bool prv_ValidateTxBuffer(const CAN_TX_BUFFER *pTxBuffer,
+                                        const char *pcChannel);
+static void        prv_RxHandlerTask_Generic(void *pvParameters);
+static void        prv_ServerTask_Generic(void *pvParameters);
+
+/* ============================================================================
+ * Utility: ID Decode
+ * ========================================================================== */
+/**
+ * @brief  Return the decoded CAN ID from a received frame.
+ *
+ *         Extended (xtd=1): id field holds the 29-bit ID directly.
+ *         Standard (xtd=0): id field holds the 11-bit ID left-shifted by 18;
+ *                           CAN_READ_ID() corrects this.
+ *
+ *         This is the ONLY function that accesses pRxBuf->id. All routing and
+ *         display code calls this helper to prevent the standard/extended
+ *         encoding mismatch (v3.0 BUG-5).
+ */
+uint32_t CAN_GetFrameId(const CAN_RX_BUFFER *pRxBuf)
+{
+    if (pRxBuf == NULL)
+    {
+        return 0U;
+    }
+    return (pRxBuf->xtd == CAN_FRAME_EXTENDED)
+           ? (pRxBuf->id & CAN_EXT_ID_MASK)
+           : (CAN_READ_ID(pRxBuf->id) & CAN_STD_ID_MASK);
+}
 
 /* ============================================================================
  * Utility: 32-bit Byte-Swap
  * ========================================================================== */
-/**
- * @brief  Swap byte order of a 32-bit value (little↔big endian conversion).
- *
- * @param  u32Value  Input 32-bit value
- * @return uint32_t  Byte-swapped result
- */
 uint32_t swap_endian_32(uint32_t u32Value)
 {
     return ((u32Value >> 24U) & 0x000000FFUL) |
@@ -154,87 +280,149 @@ uint32_t swap_endian_32(uint32_t u32Value)
 }
 
 /* ============================================================================
- * CAN Write — Raw Buffer API
+ * Runtime Query Functions
+ * ========================================================================== */
+
+/**
+ * @brief  Return the number of CAN channels actually initialised.
+ *         Valid after vCanHandlerInit() has been called.
+ */
+uint8_t CAN_GetActiveChannels(void)
+{
+    return s_u8ActiveChannels;
+}
+
+/**
+ * @brief  Return the channel count that vCanHandlerInit() will target.
+ *         = min(SESSION_GetMaxDocks(), CAN_MAX_HW_CHANNELS)
+ */
+uint8_t CAN_GetChannelCount(void)
+{
+    uint8_t u8Docks = SESSION_GetMaxDocks();
+    return (u8Docks < CAN_MAX_HW_CHANNELS) ? u8Docks : CAN_MAX_HW_CHANNELS;
+}
+
+/**
+ * @brief  Safe accessor for per-channel diagnostic counters.
+ */
+bool CAN_GetStats(uint8_t u8Channel, CAN_ChannelStats_t *pStats)
+{
+    if ((pStats == NULL) || (u8Channel >= s_u8ActiveChannels))
+    {
+        return false;
+    }
+    *pStats = xCANStats[u8Channel];
+    return true;
+}
+
+/* ============================================================================
+ * CAN Status Helpers
+ * ========================================================================== */
+
+/**
+ * @brief  Return true if CAN protocol status allows frame reception.
+ *
+ *         Accepted: LEC==0 (no error) or LEC==7 (no change since last read).
+ *         Rejected: Bus-Off or Error-Passive state.
+ *
+ *         LEC==7 must be accepted to handle the case immediately after a PCAN
+ *         reset, where the first valid frame arrives before the LEC has been
+ *         re-written by hardware. (v3.0 BUG-6 fix, preserved in v4.0.)
+ */
+static inline bool CAN_IsRxOK(uint32_t u32Status)
+{
+    if ((u32Status & CAN_PSR_BO_Msk) != 0U) { return false; }
+    if ((u32Status & CAN_PSR_EP_Msk) != 0U) { return false; }
+
+    uint32_t u32Lec = u32Status & CAN_PSR_LEC_Msk;
+    return ((u32Lec == CAN_ERROR_NONE) || (u32Lec == CAN_ERROR_LEC_NC));
+}
+
+static void vDisplayCanErrorStatus(uint32_t u32Status, const char *pcName)
+{
+    if (pcName == NULL) { return; }
+
+    static const char * const pcLecTable[] =
+    {
+        NULL, "Stuff error", "Form error", "ACK error",
+        "Bit-1 error", "Bit-0 error", "CRC error", "LEC unchanged"
+    };
+
+    uint32_t u32Lec = u32Status & CAN_PSR_LEC_Msk;
+    if ((u32Lec > 0U) && (u32Lec < 7U))
+    {
+        SYS_CONSOLE_PRINT("[%s] LEC: %s\r\n", pcName, pcLecTable[u32Lec]);
+    }
+    if ((u32Status & CAN_PSR_BO_Msk) != 0U)
+    {
+        SYS_CONSOLE_PRINT("[%s] Bus-Off!\r\n", pcName);
+    }
+    if ((u32Status & CAN_PSR_EP_Msk) != 0U)
+    {
+        SYS_CONSOLE_PRINT("[%s] Error-Passive\r\n", pcName);
+    }
+    if ((u32Status & CAN_PSR_EW_Msk) != 0U)
+    {
+        SYS_CONSOLE_PRINT("[%s] Error Warning\r\n", pcName);
+    }
+}
+
+static void vDisplayCanRxMessage(const CAN_RX_BUFFER *pRxBuf)
+{
+    if (pRxBuf == NULL) { return; }
+
+    uint8_t  u8Len  = (pRxBuf->dlc <= CAN_MAX_DLC) ? pRxBuf->dlc : CAN_MAX_DLC;
+    uint32_t u32Id  = CAN_GetFrameId(pRxBuf);
+    char     cType  = (pRxBuf->xtd == CAN_FRAME_EXTENDED) ? 'E' : 'S';
+
+    SYS_CONSOLE_PRINT("[RxMsg] %c ID:0x%08lX DLC:%u Data:",
+                      cType, (unsigned long)u32Id, (unsigned)u8Len);
+    for (uint8_t i = 0U; i < u8Len; i++)
+    {
+        SYS_CONSOLE_PRINT(" %02X", pRxBuf->data[i]);
+    }
+    SYS_CONSOLE_PRINT("\r\n");
+}
+
+/* ============================================================================
+ * RX Routing
  * ========================================================================== */
 /**
- * @brief  Transmit a raw-format CAN frame on the specified channel.
+ * @brief  Route a received frame to the correct protocol handler.
  *
- *         Expected buffer layout:
- *           Bytes [0–3]  : 29-bit CAN ID, big-endian
- *           Bytes [4–11] : 8-byte payload
- *
- * @param  u8CanIndex  Channel index (0–2)
- * @param  pu8Data     Pointer to raw frame (must be >= CAN_RAW_FRAME_SIZE bytes)
- * @param  u8Len       Length of pu8Data buffer
- * @return true on success, false on invalid input or TX hardware failure
- *
- * @note   Thread-safe: uses a local stack buffer — no shared state.
+ *         Extended (29-bit) → Power Module handler.
+ *         Standard (11-bit) → BMS handler.
  */
-bool CAN_Write(uint8_t u8CanIndex, const uint8_t *pu8Data, uint8_t u8Len)
+static void vProcessCanRxMessage(CAN_RX_BUFFER *pRxBuf, uint8_t u8CanBus)
 {
-    /* --- Input validation --- */
-    if (pu8Data == NULL)
+    if (pRxBuf == NULL)
     {
-        SYS_CONSOLE_PRINT("[CAN_Write] NULL data pointer\r\n");
-        return false;
-    }
-    if (u8Len < CAN_RAW_FRAME_SIZE)
-    {
-        SYS_CONSOLE_PRINT("[CAN_Write] Buffer too short: %u < %u\r\n",
-                          (unsigned)u8Len, (unsigned)CAN_RAW_FRAME_SIZE);
-        return false;
-    }
-    if (u8CanIndex >= CAN_NUM_CHANNELS)
-    {
-        SYS_CONSOLE_PRINT("[CAN_Write] Invalid channel: %u\r\n", (unsigned)u8CanIndex);
-        return false;
+        SYS_CONSOLE_PRINT("[RxDispatch] NULL buffer on CAN%u\r\n",
+                          (unsigned)u8CanBus);
+        return;
     }
 
-    /* --- Build TX buffer on stack (re-entrant safe, no shared static) --- */
-    CAN_TX_BUFFER txBuffer;
-    memset(&txBuffer, 0, sizeof(CAN_TX_BUFFER));
+    uint32_t u32Id = CAN_GetFrameId(pRxBuf);
+    (void)u32Id;    /* used only when CAN_DEBUG_ENABLE == 1 */
 
-    uint32_t u32CanId = ((uint32_t)pu8Data[0] << 24U) |
-                        ((uint32_t)pu8Data[1] << 16U) |
-                        ((uint32_t)pu8Data[2] <<  8U) |
-                        ((uint32_t)pu8Data[3]);
-
-    txBuffer.id  = u32CanId & CAN_EXT_ID_MASK;
-    txBuffer.xtd = CAN_FRAME_EXTENDED;
-    txBuffer.dlc = CAN_MAX_DLC;
-
-    for (uint8_t i = 0U; i < CAN_MAX_DLC; i++)
+    if (pRxBuf->xtd == CAN_FRAME_EXTENDED)
     {
-        txBuffer.data[i] = pu8Data[i + CAN_ID_BYTE_SIZE];
+        CAN_DEBUG(SYS_CONSOLE_PRINT("[RxDispatch] CAN%u → PM  ID=0x%08lX\r\n",
+                                    (unsigned)u8CanBus, (unsigned long)u32Id));
+        vProcessPMCanMessage(pRxBuf, u8CanBus);
     }
-
-    CAN_DEBUG(
-        SYS_CONSOLE_PRINT("[CAN%u Write] ID: 0x%08lX  Payload:", (unsigned)u8CanIndex,
-                          (unsigned long)txBuffer.id);
-        for (uint8_t i = 0U; i < CAN_MAX_DLC; i++)
-            SYS_CONSOLE_PRINT(" %02X", txBuffer.data[i]);
-        SYS_CONSOLE_PRINT("\r\n");
-    );
-
-    /* --- Route to hardware FIFO --- */
-    switch (u8CanIndex)
+    else
     {
-        case 0U: return CAN0_MessageTransmitFifo(1U, &txBuffer);
-        case 1U: return CAN1_MessageTransmitFifo(1U, &txBuffer);
-        case 2U: return CAN2_MessageTransmitFifo(1U, &txBuffer);
-        default: return false; /* unreachable — guarded above */
+        CAN_DEBUG(SYS_CONSOLE_PRINT("[RxDispatch] CAN%u → BMS ID=0x%03lX\r\n",
+                                    (unsigned)u8CanBus, (unsigned long)u32Id));
+        vProcessBMSCanMessage(pRxBuf, u8CanBus);
     }
 }
 
 /* ============================================================================
- * CAN Write — Structured Buffer API (per channel)
+ * TX Buffer Validation Helper
  * ========================================================================== */
-
-/**
- * @brief  Common validation helper for structured TX buffer.
- *         Returns false and logs if buffer is NULL or DLC is out of range.
- */
-static inline bool prv_ValidateTxBuffer(const CAN_TX_BUFFER *const pTxBuffer,
+static inline bool prv_ValidateTxBuffer(const CAN_TX_BUFFER *pTxBuffer,
                                         const char *pcChannel)
 {
     if (pTxBuffer == NULL)
@@ -251,360 +439,297 @@ static inline bool prv_ValidateTxBuffer(const CAN_TX_BUFFER *const pTxBuffer,
     return true;
 }
 
+/* ============================================================================
+ * CAN Write — Raw Buffer API
+ * ========================================================================== */
 /**
- * @brief  Transmit a structured CAN TX buffer on CAN0.
- * @param  pTxBuffer  Pointer to CAN_TX_BUFFER (must not be NULL, DLC ≤ 8)
- * @return true on success, false on validation failure or TX error
+ * @brief  Transmit a raw byte-array CAN frame on the specified channel.
+ *
+ *         Frame type auto-detection (v3.0 BUG-3 fix, preserved):
+ *           u32RawId <= CAN_STD_ID_MASK → standard frame (xtd=0, id shifted).
+ *           u32RawId >  CAN_STD_ID_MASK → extended frame (xtd=1, id as-is).
+ *
+ *         Uses s_canHwOps[u8CanIndex].pfTxFifo instead of a switch-case.
  */
+bool CAN_Write(uint8_t u8CanIndex, const uint8_t *pu8Data, uint8_t u8Len)
+{
+    if (pu8Data == NULL)
+    {
+        SYS_CONSOLE_PRINT("[CAN_Write] NULL data pointer\r\n");
+        return false;
+    }
+    if (u8Len < (uint8_t)CAN_RAW_FRAME_SIZE)
+    {
+        SYS_CONSOLE_PRINT("[CAN_Write] Buffer too short: %u < %u\r\n",
+                          (unsigned)u8Len, (unsigned)CAN_RAW_FRAME_SIZE);
+        return false;
+    }
+    if (u8CanIndex >= s_u8ActiveChannels)
+    {
+        SYS_CONSOLE_PRINT("[CAN_Write] Channel %u not active (active=%u)\r\n",
+                          (unsigned)u8CanIndex, (unsigned)s_u8ActiveChannels);
+        return false;
+    }
+
+    /* Parse big-endian ID */
+    uint32_t u32RawId = ((uint32_t)pu8Data[0] << 24U) |
+                        ((uint32_t)pu8Data[1] << 16U) |
+                        ((uint32_t)pu8Data[2] <<  8U) |
+                        ((uint32_t)pu8Data[3]);
+
+    CAN_TX_BUFFER txBuf;
+    (void)memset(&txBuf, 0, sizeof(CAN_TX_BUFFER));
+
+    if (u32RawId <= (uint32_t)CAN_STD_ID_MASK)
+    {
+        txBuf.id  = CAN_WRITE_ID(u32RawId);
+        txBuf.xtd = CAN_FRAME_STANDARD;
+    }
+    else
+    {
+        txBuf.id  = u32RawId & CAN_EXT_ID_MASK;
+        txBuf.xtd = CAN_FRAME_EXTENDED;
+    }
+
+    txBuf.dlc = CAN_MAX_DLC;
+    (void)memcpy(txBuf.data, &pu8Data[CAN_ID_BYTE_SIZE], CAN_MAX_DLC);
+
+    CAN_DEBUG(
+        SYS_CONSOLE_PRINT("[%s Write] ID:0x%08lX xtd:%u  Data:",
+                          s_canHwOps[u8CanIndex].pcName,
+                          (unsigned long)u32RawId, (unsigned)txBuf.xtd);
+        for (uint8_t i = 0U; i < CAN_MAX_DLC; i++)
+            SYS_CONSOLE_PRINT(" %02X", txBuf.data[i]);
+        SYS_CONSOLE_PRINT("\r\n");
+    );
+
+    /* Route to hardware via ops table — no switch-case needed */
+    return s_canHwOps[u8CanIndex].pfTxFifo(1U, &txBuf);
+}
+
+/* ============================================================================
+ * CAN Write — Structured TX Buffer API (unified, replaces CAN0/1/2_Write)
+ * ========================================================================== */
+/**
+ * @brief  Transmit a structured TX buffer on the specified channel directly.
+ *         Uses s_canHwOps[u8CanIndex].pfTxFifo — no switch-case.
+ */
+bool CAN_WriteStruct(uint8_t u8CanIndex, const CAN_TX_BUFFER *const pTxBuffer)
+{
+    if (u8CanIndex >= s_u8ActiveChannels)
+    {
+        SYS_CONSOLE_PRINT("[CAN_WriteStruct] Channel %u not active\r\n",
+                          (unsigned)u8CanIndex);
+        return false;
+    }
+
+    const char *pcName = s_canHwOps[u8CanIndex].pcName;
+
+    if (!prv_ValidateTxBuffer(pTxBuffer, pcName))
+    {
+        return false;
+    }
+
+    if (!s_canHwOps[u8CanIndex].pfTxFifo(1U, pTxBuffer))
+    {
+        SYS_CONSOLE_PRINT("[%s WriteStruct] TX FIFO failed ID=0x%08lX\r\n",
+                          pcName, (unsigned long)pTxBuffer->id);
+        return false;
+    }
+    return true;
+}
+
+/* ============================================================================
+ * Backward-Compatible Per-Channel Write Wrappers
+ *
+ * Code that calls CAN0_Write / CAN1_Write / CAN2_Write directly still
+ * compiles. These forward to CAN_WriteStruct with the fixed channel index.
+ * ========================================================================== */
 bool CAN0_Write(const CAN_TX_BUFFER *const pTxBuffer)
 {
-    if (!prv_ValidateTxBuffer(pTxBuffer, "CAN0")) { return false; }
-
-    if (!CAN0_MessageTransmitFifo(1U, pTxBuffer))
-    {
-        SYS_CONSOLE_PRINT("[CAN0 Write] TX FIFO failed (ID=0x%08lX)\r\n",
-                          (unsigned long)pTxBuffer->id);
-        return false;
-    }
-    return true;
+    return CAN_WriteStruct(0U, pTxBuffer);
 }
-
-/**
- * @brief  Transmit a structured CAN TX buffer on CAN1.
- * @param  pTxBuffer  Pointer to CAN_TX_BUFFER (must not be NULL, DLC ≤ 8)
- * @return true on success, false on validation failure or TX error
- */
 bool CAN1_Write(const CAN_TX_BUFFER *const pTxBuffer)
 {
-    if (!prv_ValidateTxBuffer(pTxBuffer, "CAN1")) { return false; }
-
-    if (!CAN1_MessageTransmitFifo(1U, pTxBuffer))
-    {
-        SYS_CONSOLE_PRINT("[CAN1 Write] TX FIFO failed (ID=0x%08lX)\r\n",
-                          (unsigned long)pTxBuffer->id);
-        return false;
-    }
-    return true;
+    return CAN_WriteStruct(1U, pTxBuffer);
 }
-
-/**
- * @brief  Transmit a structured CAN TX buffer on CAN2.
- * @param  pTxBuffer  Pointer to CAN_TX_BUFFER (must not be NULL, DLC ≤ 8)
- * @return true on success, false on validation failure or TX error
- */
 bool CAN2_Write(const CAN_TX_BUFFER *const pTxBuffer)
 {
-    if (!prv_ValidateTxBuffer(pTxBuffer, "CAN2")) { return false; }
-
-    if (!CAN2_MessageTransmitFifo(1U, pTxBuffer))
-    {
-        SYS_CONSOLE_PRINT("[CAN2 Write] TX FIFO failed (ID=0x%08lX)\r\n",
-                          (unsigned long)pTxBuffer->id);
-        return false;
-    }
-    return true;
+    return CAN_WriteStruct(2U, pTxBuffer);
+}
+bool CAN3_Write(const CAN_TX_BUFFER *const pTxBuffer)
+{
+    return CAN_WriteStruct(3U, pTxBuffer);
+}
+bool CAN4_Write(const CAN_TX_BUFFER *const pTxBuffer)
+{
+    return CAN_WriteStruct(4U, pTxBuffer);
+}
+bool CAN5_Write(const CAN_TX_BUFFER *const pTxBuffer)
+{
+    return CAN_WriteStruct(5U, pTxBuffer);
 }
 
 /* ============================================================================
  * TX Queue Enqueue API
  * ========================================================================== */
 /**
- * @brief  Enqueue a CAN TX frame for the given dock's CAN channel.
+ * @brief  Enqueue a TX frame for the dock's CAN channel.
  *
- *         The mapping is:
- *           DOCK_1 → CANBUS_0 / xCANTXQueueHandler[0]
- *           DOCK_2 → CANBUS_1 / xCANTXQueueHandler[1]
- *           DOCK_3 → CANBUS_2 / xCANTXQueueHandler[2]
+ *         Dock → channel mapping:
+ *           channel = (u8DockNo - DOCK_1)
  *
- *         Non-blocking: if the queue is full the frame is dropped and
- *         a warning is printed. This avoids blocking the caller's task.
+ *         This arithmetic replaces the switch-case from v3.0.
+ *         DOCK_1 = 1, so DOCK_1 → channel 0, DOCK_6 → channel 5.
  *
- * @param  pCanTxBuffer  Pointer to frame to enqueue (must not be NULL)
- * @param  u8DockNo      Dock identifier (DOCK_1, DOCK_2, or DOCK_3)
+ *         Validation:
+ *           - u8DockNo must be >= DOCK_1 and < (DOCK_1 + s_u8ActiveChannels)
+ *           - Derived channel must be < s_u8ActiveChannels
+ *
+ *         Non-blocking: drops frame and increments counter if queue is full.
  */
-void vSendCanTxMsgToQueue(const CAN_TX_BUFFER *const pCanTxBuffer, uint8_t u8DockNo)
+void vSendCanTxMsgToQueue(const CAN_TX_BUFFER *const pCanTxBuffer,
+                          uint8_t u8DockNo)
 {
     if (pCanTxBuffer == NULL)
     {
-        SYS_CONSOLE_PRINT("[TxQueue] NULL TX buffer for dock %u\r\n", (unsigned)u8DockNo);
+        SYS_CONSOLE_PRINT("[TxQueue] NULL buffer for dock %u\r\n",
+                          (unsigned)u8DockNo);
         return;
     }
 
-    /* Map dock number → channel index */
-    uint8_t u8Channel;
-    switch (u8DockNo)
+    /* Validate dock range */
+    if ((u8DockNo < (uint8_t)DOCK_1) ||
+        (u8DockNo >= (uint8_t)(DOCK_1 + s_u8ActiveChannels)))
     {
-        case DOCK_1: u8Channel = (uint8_t)CANBUS_0; break;
-        case DOCK_2: u8Channel = (uint8_t)CANBUS_1; break;
-        case DOCK_3: u8Channel = (uint8_t)CANBUS_2; break;
-        default:
-            SYS_CONSOLE_PRINT("[TxQueue] Invalid dock number: %u\r\n", (unsigned)u8DockNo);
-            return;
+        SYS_CONSOLE_PRINT("[TxQueue] Dock %u out of range "
+                          "(active channels: %u, valid: DOCK_%u … DOCK_%u)\r\n",
+                          (unsigned)u8DockNo,
+                          (unsigned)s_u8ActiveChannels,
+                          (unsigned)DOCK_1,
+                          (unsigned)(DOCK_1 + s_u8ActiveChannels - 1U));
+        return;
     }
+
+    /* Arithmetic dock → channel mapping */
+    uint8_t u8Channel = (uint8_t)(u8DockNo - (uint8_t)DOCK_1);
 
     QueueHandle_t xQueue = xCANTXQueueHandler[u8Channel];
     if (xQueue == NULL)
     {
-        SYS_CONSOLE_PRINT("[TxQueue] Queue not initialised for channel %u\r\n",
-                          (unsigned)u8Channel);
+        SYS_CONSOLE_PRINT("[TxQueue] Queue NULL for %s\r\n",
+                          s_canHwOps[u8Channel].pcName);
         return;
     }
 
-    if (xQueueSend(xQueue, pCanTxBuffer, pdMS_TO_TICKS(CAN_TX_DEQUEUE_TIMEOUT_MS)) != pdPASS)
+    if (xQueueSend(xQueue, pCanTxBuffer, 0U) != pdPASS)
     {
-        SYS_CONSOLE_PRINT("[TxQueue] Dock %u (CAN%u) queue full — frame dropped\r\n",
-                          (unsigned)u8DockNo, (unsigned)u8Channel);
+        xCANStats[u8Channel].u32TxDrops++;
+        SYS_CONSOLE_PRINT("[TxQueue] %s TX queue full — frame dropped "
+                          "(total: %lu)\r\n",
+                          s_canHwOps[u8Channel].pcName,
+                          (unsigned long)xCANStats[u8Channel].u32TxDrops);
     }
 }
 
 /* ============================================================================
- * RX Message Routing
+ * Generic RX Drain Task
+ *
+ * Single entry point for all channels. Channel index is passed as pvParameters
+ * (cast from uint32_t to avoid pointer-size issues on 32-bit MCU).
+ *
+ * Replaces vCan0RxHandlerTask / vCan1RxHandlerTask / vCan2RxHandlerTask.
+ * All hardware accesses go through s_canHwOps[u8Channel] — no switch-case.
  * ========================================================================== */
 /**
- * @brief  Route a received CAN frame to the correct protocol handler.
+ * @brief  Generic RX drain task. Polls hardware FIFO and pushes to SW queue.
  *
- *         Routing rule:
- *           Extended frame (xtd == 1) → Power Module handler
- *           Standard frame (xtd == 0) → BMS handler
+ *         pvParameters: (void*)(uintptr_t)channel_index
  *
- * @param  pRxBuf  Pointer to received CAN buffer (must not be NULL)
- * @param  u8CanBus CAN channel index (CANBUS_0–CANBUS_2)
+ *         Per cycle:
+ *           1. Read interrupt flag via ops->pfIntGet().
+ *           2. If set: clear, get error status, check CAN_IsRxOK().
+ *           3. Get fill level via ops->pfFifoFill().
+ *           4. Read frame via ops->pfRxFifo().
+ *           5. Push to SW RX queue.
+ *           6. Sleep CAN_RX_POLL_DELAY_MS.
+ *
+ *         All locals initialised before use (v3.0 BUG-4 fix, preserved).
  */
-static void vProcessCanRxMessage(CAN_RX_BUFFER *pRxBuf, uint8_t u8CanBus)
+static void prv_RxHandlerTask_Generic(void *pvParameters)
 {
-    if (pRxBuf == NULL)
+    uint8_t u8Channel = (uint8_t)(uintptr_t)pvParameters;
+
+    /* Defensive guard — should never fail if launched by vCanHandlerInit() */
+    if (u8Channel >= s_u8ActiveChannels)
     {
-        SYS_CONSOLE_PRINT("[RxDispatch] NULL RX buffer on CAN%u\r\n", (unsigned)u8CanBus);
-        return;
-    }
-
-    if (pRxBuf->xtd)
-    {
-        vProcessPMCanMessage(pRxBuf, u8CanBus);
-    }
-    else
-    {
-        vProcessBMSCanMessage(pRxBuf, u8CanBus);
-    }
-}
-
-/* ============================================================================
- * CAN Status Helpers
- * ========================================================================== */
-/**
- * @brief  Evaluate Last Error Code field of CAN PSR to decide if RX is valid.
- *
- *         LEC == 0 (no error) or LEC == 7 (no change since last read)
- *         are both acceptable for receiving.
- *
- * @param  u32Status  CAN protocol status register value
- * @return true  No disqualifying RX error
- * @return false Error condition detected
- */
-static inline bool CAN_IsRxOK(uint32_t u32Status)
-{
-    uint32_t u32Lec = u32Status & CAN_PSR_LEC_Msk;
-    return (u32Lec == CAN_ERROR_NONE) || (u32Lec == CAN_ERROR_LEC_NC);
-}
-
-/**
- * @brief  Decode and print CAN Protocol Status Register error fields.
- *
- *         Only called when CAN_DEBUG_ENABLE == 1.
- *
- * @param  u32Status  CAN PSR value from CANx_ErrorGet()
- * @param  pcCanName  Human-readable channel name (e.g. "CAN0")
- */
-static void vDisplayCanErrorStatus(uint32_t u32Status, const char *pcCanName)
-{
-    if (pcCanName == NULL) { return; }
-
-    static const char * const pcLecTable[] =
-    {
-        NULL,            /* 0 = no error    */
-        "Stuff error",   /* 1               */
-        "Form error",    /* 2               */
-        "ACK error",     /* 3               */
-        "Bit-1 error",   /* 4               */
-        "Bit-0 error",   /* 5               */
-        "CRC error",     /* 6               */
-        "LEC unchanged"  /* 7               */
-    };
-
-    uint32_t u32Lec = u32Status & CAN_PSR_LEC_Msk;
-    if ((u32Lec > 0U) && (u32Lec < 7U) && (pcLecTable[u32Lec] != NULL))
-    {
-        SYS_CONSOLE_PRINT("[%s] %s\r\n", pcCanName, pcLecTable[u32Lec]);
-    }
-
-    if (u32Status & CAN_PSR_BO_Msk)
-    {
-        SYS_CONSOLE_PRINT("[%s] Bus-Off detected!\r\n", pcCanName);
-    }
-
-    if (u32Status & CAN_PSR_EP_Msk)
-    {
-        SYS_CONSOLE_PRINT("[%s] Error-Passive state\r\n", pcCanName);
-    }
-
-    if (u32Status & CAN_PSR_EW_Msk)
-    {
-        SYS_CONSOLE_PRINT("[%s] Error Warning limit reached\r\n", pcCanName);
-    }
-}
-
-/**
- * @brief  Print received CAN frame ID, DLC, and payload for debug.
- *
- * @param  pRxBuf  Pointer to received CAN buffer (must not be NULL)
- */
-static void vDisplayCanRxMessage(const CAN_RX_BUFFER *pRxBuf)
-{
-    if (pRxBuf == NULL)
-    {
-        SYS_CONSOLE_PRINT("[RxMsg] NULL buffer\r\n");
-        return;
-    }
-
-    uint8_t  u8Len  = (pRxBuf->dlc <= CAN_MAX_DLC) ? pRxBuf->dlc : CAN_MAX_DLC;
-    uint32_t u32Id  = pRxBuf->xtd ? pRxBuf->id : (CAN_READ_ID(pRxBuf->id) & CAN_STD_ID_MASK);
-
-    SYS_CONSOLE_PRINT("[RxMsg] ID: 0x%08lX  DLC: %u  Data:",
-                      (unsigned long)u32Id, (unsigned)u8Len);
-
-    for (uint8_t i = 0U; i < u8Len; i++)
-    {
-        SYS_CONSOLE_PRINT(" %02X", pRxBuf->data[i]);
-    }
-    SYS_CONSOLE_PRINT("\r\n");
-}
-
-/* ============================================================================
- * Generic RX Handler Task Body
- * ========================================================================== */
-/**
- * @brief  Common logic for all CAN RX handler tasks.
- *
- *         Polls the specified channel's RX FIFO each cycle.
- *         On interrupt flag:
- *           1. Clears interrupt flag
- *           2. Checks error status
- *           3. Reads all available frames from FIFO in one call
- *           4. Pushes each frame onto the channel's RX queue
- *
- * @param  u8Channel   CAN channel (0–2)
- * @param  pRxBuf      Per-channel static RX buffer array
- * @param  u8FifoSize  Hardware FIFO depth (CAN0/1/2_RX_FIFO0_SIZE)
- * @param  xRxQueue    RX queue handle for this channel
- * @param  pcName      Channel name string for log output
- */
-static void vCanRxHandlerTask_Generic(uint8_t       u8Channel,
-                                      CAN_RX_BUFFER *pRxBuf,
-                                      uint8_t        u8FifoSize,
-                                      QueueHandle_t  xRxQueue,
-                                      const char    *pcName)
-{
-    /* Validate parameters before task loop */
-    if ((pRxBuf == NULL) || (xRxQueue == NULL) || (pcName == NULL))
-    {
-        SYS_CONSOLE_PRINT("[RxTask] Invalid parameters for channel %u — task exiting\r\n",
-                          (unsigned)u8Channel);
+        SYS_CONSOLE_PRINT("[RxTask] Channel %u >= active %u — exiting\r\n",
+                          (unsigned)u8Channel, (unsigned)s_u8ActiveChannels);
         vTaskDelete(NULL);
-        return; /* unreachable but satisfies static analysers */
+        return;
     }
 
-    SYS_CONSOLE_PRINT("[%s RX] Task started\r\n", pcName);
+    const CAN_HwOps_t *pOps     = &s_canHwOps[u8Channel];
+    CAN_RX_BUFFER     *pRxBuf   = &s_canRxBuf[u8Channel];
+    QueueHandle_t      xRxQueue = xCANRXQueueHandler[u8Channel];
+
+    if ((pOps == NULL) || (pRxBuf == NULL) || (xRxQueue == NULL))
+    {
+        SYS_CONSOLE_PRINT("[%s RX] NULL resource — exiting\r\n",
+                          pOps ? pOps->pcName : "???");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    SYS_CONSOLE_PRINT("[%s RX] Task started (poll %u ms)\r\n",
+                      pOps->pcName, (unsigned)CAN_RX_POLL_DELAY_MS);
 
     while (true)
     {
-        uint32_t u32InterruptFlag;
-        uint32_t u32ErrorStatus;
-        uint8_t  u8Count;
-        bool     bRxResult;
+        /* BUG-4 FIX: zero-initialise all locals */
+        bool     bIntFlag    = false;
+        uint32_t u32ErrStat  = 0U;
+        uint8_t  u8FillLevel = 0U;
+        bool     bRxOk       = false;
 
-        /* --- Read hardware registers via channel index --- */
-        switch (u8Channel)
+        /* ---- Poll hardware via ops table ---- */
+        bIntFlag = pOps->pfIntGet(CAN_INTERRUPT_RF0N_MASK);
+
+        if (bIntFlag)
         {
-            case 0U:
-                u32InterruptFlag = CAN0_InterruptGet(CAN_INTERRUPT_RF0N_MASK);
-                if (!u32InterruptFlag) { break; }
-                CAN0_InterruptClear(CAN_INTERRUPT_RF0N_MASK);
-                u32ErrorStatus = CAN0_ErrorGet();
-                CAN_DEBUG(vDisplayCanErrorStatus(u32ErrorStatus, pcName));
-                if (!CAN_IsRxOK(u32ErrorStatus)) { break; }
-                u8Count = CAN0_RxFifoFillLevelGet(CAN_RX_FIFO_0);
-                if (u8Count == 0U) { break; }
-                if (u8Count > u8FifoSize)
-                {
-                    SYS_CONSOLE_PRINT("[%s RX] FIFO overflow: clamping %u→%u\r\n",
-                                      pcName, (unsigned)u8Count, (unsigned)u8FifoSize);
-                    u8Count = u8FifoSize;
-                }
-                bRxResult = CAN0_MessageReceiveFifo(CAN_RX_FIFO_0, u8Count, pRxBuf);
-                break;
+            pOps->pfIntClear(CAN_INTERRUPT_RF0N_MASK);
+            u32ErrStat  = pOps->pfErrorGet();
+            CAN_DEBUG(vDisplayCanErrorStatus(u32ErrStat, pOps->pcName));
+            bRxOk       = CAN_IsRxOK(u32ErrStat);
 
-            case 1U:
-                u32InterruptFlag = CAN1_InterruptGet(CAN_INTERRUPT_RF0N_MASK);
-                if (!u32InterruptFlag) { break; }
-                CAN1_InterruptClear(CAN_INTERRUPT_RF0N_MASK);
-                u32ErrorStatus = CAN1_ErrorGet();
-                CAN_DEBUG(vDisplayCanErrorStatus(u32ErrorStatus, pcName));
-                if (!CAN_IsRxOK(u32ErrorStatus)) { break; }
-                u8Count = CAN1_RxFifoFillLevelGet(CAN_RX_FIFO_0);
-                if (u8Count == 0U) { break; }
-                if (u8Count > u8FifoSize)
-                {
-                    SYS_CONSOLE_PRINT("[%s RX] FIFO overflow: clamping %u→%u\r\n",
-                                      pcName, (unsigned)u8Count, (unsigned)u8FifoSize);
-                    u8Count = u8FifoSize;
-                }
-                bRxResult = CAN1_MessageReceiveFifo(CAN_RX_FIFO_0, u8Count, pRxBuf);
-                break;
-
-            case 2U:
-                u32InterruptFlag = CAN2_InterruptGet(CAN_INTERRUPT_RF0N_MASK);
-                if (!u32InterruptFlag) { break; }
-                CAN2_InterruptClear(CAN_INTERRUPT_RF0N_MASK);
-                u32ErrorStatus = CAN2_ErrorGet();
-                CAN_DEBUG(vDisplayCanErrorStatus(u32ErrorStatus, pcName));
-                if (!CAN_IsRxOK(u32ErrorStatus)) { break; }
-                u8Count = CAN2_RxFifoFillLevelGet(CAN_RX_FIFO_0);
-                if (u8Count == 0U) { break; }
-                if (u8Count > u8FifoSize)
-                {
-                    SYS_CONSOLE_PRINT("[%s RX] FIFO overflow: clamping %u→%u\r\n",
-                                      pcName, (unsigned)u8Count, (unsigned)u8FifoSize);
-                    u8Count = u8FifoSize;
-                }
-                bRxResult = CAN2_MessageReceiveFifo(CAN_RX_FIFO_0, u8Count, pRxBuf);
-                break;
-
-            default:
-                /* Should never reach here */
-                vTaskDelay(pdMS_TO_TICKS(CAN_RX_POLL_DELAY_MS));
-                continue;
-        }
-
-        /* --- Queue received frames --- */
-        if (u32InterruptFlag && CAN_IsRxOK(u32ErrorStatus))
-        {
-            if (bRxResult)
+            if (bRxOk)
             {
-                for (uint8_t i = 0U; i < u8Count; i++)
+                u8FillLevel = pOps->pfFifoFill(CAN_RX_FIFO_0);
+                if (u8FillLevel > 0U)
                 {
-                    CAN_DEBUG(vDisplayCanRxMessage(&pRxBuf[i]));
-
-                    if (xQueueSend(xRxQueue, &pRxBuf[i],
-                                   pdMS_TO_TICKS(CAN_RX_QUEUE_TIMEOUT_MS)) != pdPASS)
-                    {
-                        SYS_CONSOLE_PRINT("[%s RX] Queue full - frame dropped (ID=0x%08lX)\r\n",
-                                          pcName, (unsigned long)pRxBuf[i].id);
-                    }
+                    bRxOk = pOps->pfRxFifo(CAN_RX_FIFO_0, 1U, pRxBuf);
+                }
+                else
+                {
+                    bRxOk = false;  /* nothing to read */
                 }
             }
-            else
+        }
+
+        /* ---- Push to SW queue if we got a frame ---- */
+        if (bIntFlag && bRxOk)
+        {
+            CAN_DEBUG(vDisplayCanRxMessage(pRxBuf));
+
+            if (xQueueSend(xRxQueue, pRxBuf,
+                           pdMS_TO_TICKS(CAN_RX_QUEUE_TIMEOUT_MS)) != pdPASS)
             {
-                SYS_CONSOLE_PRINT("[%s RX] MessageReceiveFifo failed\r\n", pcName);
+                xCANStats[u8Channel].u32RxDrops++;
+                SYS_CONSOLE_PRINT("[%s RX] SW queue full — dropped "
+                                  "ID=0x%08lX (total: %lu)\r\n",
+                                  pOps->pcName,
+                                  (unsigned long)CAN_GetFrameId(pRxBuf),
+                                  (unsigned long)xCANStats[u8Channel].u32RxDrops);
             }
         }
 
@@ -613,56 +738,69 @@ static void vCanRxHandlerTask_Generic(uint8_t       u8Channel,
 }
 
 /* ============================================================================
- * Generic Server Task Body
+ * Generic Server Task
+ *
+ * Single entry point for all channels. Channel index passed as pvParameters.
+ *
+ * Replaces vCan0HandlerServerTask / vCan1HandlerServerTask / vCan2HandlerServerTask.
+ * TX write uses CAN_WriteStruct() which routes via s_canHwOps — no switch-case.
  * ========================================================================== */
 /**
- * @brief  Common logic for all CAN server (TX+RX dispatch) tasks.
+ * @brief  Generic server task. Drains entire SW TX and RX queues each cycle.
  *
- *         Each cycle:
- *           1. Dequeue one TX frame and transmit immediately (non-blocking dequeue)
- *           2. Dequeue one RX frame and dispatch to protocol handler (non-blocking)
+ *         pvParameters: (void*)(uintptr_t)channel_index
  *
- * @param  u8Channel   CAN channel index (0–2), used for CAN_Write routing
- * @param  xTxQueue    TX queue for this channel
- * @param  xRxQueue    RX queue for this channel
+ *         TX phase: loop xQueueReceive(xTxQueue, 0) until empty → CAN_WriteStruct().
+ *         RX phase: loop xQueueReceive(xRxQueue, 0) until empty → vProcessCanRxMessage().
+ *
+ *         Full-drain per cycle (v3.0 BUG-1 + BUG-2 fix, preserved):
+ *         All frames that arrived simultaneously are processed before sleeping.
  */
-static void vCanServerTask_Generic(uint8_t       u8Channel,
-                                   QueueHandle_t xTxQueue,
-                                   QueueHandle_t xRxQueue)
+static void prv_ServerTask_Generic(void *pvParameters)
 {
-    if ((xTxQueue == NULL) || (xRxQueue == NULL))
+    uint8_t u8Channel = (uint8_t)(uintptr_t)pvParameters;
+
+    if (u8Channel >= s_u8ActiveChannels)
     {
-        SYS_CONSOLE_PRINT("[SrvTask] NULL queue for CAN%u — task exiting\r\n",
-                          (unsigned)u8Channel);
+        SYS_CONSOLE_PRINT("[SrvTask] Channel %u >= active %u — exiting\r\n",
+                          (unsigned)u8Channel, (unsigned)s_u8ActiveChannels);
         vTaskDelete(NULL);
         return;
     }
+
+    QueueHandle_t xTxQueue = xCANTXQueueHandler[u8Channel];
+    QueueHandle_t xRxQueue = xCANRXQueueHandler[u8Channel];
+
+    if ((xTxQueue == NULL) || (xRxQueue == NULL))
+    {
+        SYS_CONSOLE_PRINT("[%s SRV] NULL queue — exiting\r\n",
+                          s_canHwOps[u8Channel].pcName);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    SYS_CONSOLE_PRINT("[%s SRV] Task started (cycle %u ms)\r\n",
+                      s_canHwOps[u8Channel].pcName,
+                      (unsigned)CAN_SERVER_TASK_DELAY_MS);
 
     CAN_TX_BUFFER tx;
     CAN_RX_BUFFER rx;
 
     while (true)
     {
-        /* Dequeue and transmit one TX frame (non-blocking) */
-        if (xQueueReceive(xTxQueue, &tx, pdMS_TO_TICKS(CAN_TX_DEQUEUE_TIMEOUT_MS)) == pdPASS)
+        /* ---- TX phase: drain entire SW TX queue ---- */
+        while (xQueueReceive(xTxQueue, &tx, 0U) == pdPASS)
         {
-            bool bTxOk;
-            switch (u8Channel)
+            if (!CAN_WriteStruct(u8Channel, &tx))
             {
-                case 0U: bTxOk = CAN0_Write(&tx); break;
-                case 1U: bTxOk = CAN1_Write(&tx); break;
-                case 2U: bTxOk = CAN2_Write(&tx); break;
-                default: bTxOk = false;            break;
-            }
-            if (!bTxOk)
-            {
-                SYS_CONSOLE_PRINT("[SrvTask CAN%u] TX write failed (ID=0x%08lX)\r\n",
-                                  (unsigned)u8Channel, (unsigned long)tx.id);
+                SYS_CONSOLE_PRINT("[%s SRV] TX failed ID=0x%08lX\r\n",
+                                  s_canHwOps[u8Channel].pcName,
+                                  (unsigned long)tx.id);
             }
         }
 
-        /* Dequeue and dispatch one RX frame (non-blocking) */
-        if (xQueueReceive(xRxQueue, &rx, pdMS_TO_TICKS(CAN_RX_DEQUEUE_TIMEOUT_MS)) == pdPASS)
+        /* ---- RX phase: drain entire SW RX queue ---- */
+        while (xQueueReceive(xRxQueue, &rx, 0U) == pdPASS)
         {
             vProcessCanRxMessage(&rx, u8Channel);
         }
@@ -672,108 +810,129 @@ static void vCanServerTask_Generic(uint8_t       u8Channel,
 }
 
 /* ============================================================================
- * Per-Channel RX Handler Tasks (thin wrappers over generic body)
+ * Backward-Compatible Per-Channel Task Wrappers
+ *
+ * These exist so any existing xTaskCreate(vCan0RxHandlerTask, ...) calls
+ * continue to compile. They forward to the generic launcher with the
+ * appropriate channel index hardcoded.
+ *
+ * New code should call vCanHandlerInit() instead of creating tasks manually.
  * ========================================================================== */
+void vCan0RxHandlerTask(void *pvParameters) { (void)pvParameters; prv_RxHandlerTask_Generic((void *)(uintptr_t)0U); }
+void vCan1RxHandlerTask(void *pvParameters) { (void)pvParameters; prv_RxHandlerTask_Generic((void *)(uintptr_t)1U); }
+void vCan2RxHandlerTask(void *pvParameters) { (void)pvParameters; prv_RxHandlerTask_Generic((void *)(uintptr_t)2U); }
+void vCan3RxHandlerTask(void *pvParameters) { (void)pvParameters; prv_RxHandlerTask_Generic((void *)(uintptr_t)3U); }
+void vCan4RxHandlerTask(void *pvParameters) { (void)pvParameters; prv_RxHandlerTask_Generic((void *)(uintptr_t)4U); }
+void vCan5RxHandlerTask(void *pvParameters) { (void)pvParameters; prv_RxHandlerTask_Generic((void *)(uintptr_t)5U); }
 
-/** @brief CAN0 RX handler task — polls CAN0 FIFO, pushes to RX queue. */
-void vCan0RxHandlerTask(void *pvParameters)
-{
-    (void)pvParameters;
-    vCanRxHandlerTask_Generic(0U,
-                              s_can0RxBuffer,
-                              (uint8_t)CAN0_RX_FIFO0_SIZE,
-                              xCANRXQueueHandler[0],
-                              "CAN0");
-}
-
-/** @brief CAN1 RX handler task — polls CAN1 FIFO, pushes to RX queue. */
-void vCan1RxHandlerTask(void *pvParameters)
-{
-    (void)pvParameters;
-    vCanRxHandlerTask_Generic(1U,
-                              s_can1RxBuffer,
-                              (uint8_t)CAN1_RX_FIFO0_SIZE,
-                              xCANRXQueueHandler[1],
-                              "CAN1");
-}
-
-/** @brief CAN2 RX handler task — polls CAN2 FIFO, pushes to RX queue. */
-void vCan2RxHandlerTask(void *pvParameters)
-{
-    (void)pvParameters;
-    vCanRxHandlerTask_Generic(2U,
-                              s_can2RxBuffer,
-                              (uint8_t)CAN2_RX_FIFO0_SIZE,
-                              xCANRXQueueHandler[2],
-                              "CAN2");
-}
-
-/* ============================================================================
- * Per-Channel Server Tasks (thin wrappers over generic body)
- * ========================================================================== */
-
-/** @brief CAN0 server task — dequeues TX, dispatches RX for CAN0. */
-void vCan0HandlerServerTask(void *pvParameters)
-{
-    (void)pvParameters;
-    vCanServerTask_Generic(0U, xCANTXQueueHandler[0], xCANRXQueueHandler[0]);
-}
-
-/** @brief CAN1 server task — dequeues TX, dispatches RX for CAN1. */
-void vCan1HandlerServerTask(void *pvParameters)
-{
-    (void)pvParameters;
-    vCanServerTask_Generic(1U, xCANTXQueueHandler[1], xCANRXQueueHandler[1]);
-}
-
-/** @brief CAN2 server task — dequeues TX, dispatches RX for CAN2. */
-void vCan2HandlerServerTask(void *pvParameters)
-{
-    (void)pvParameters;
-    vCanServerTask_Generic(2U, xCANTXQueueHandler[2], xCANRXQueueHandler[2]);
-}
+void vCan0HandlerServerTask(void *pvParameters) { (void)pvParameters; prv_ServerTask_Generic((void *)(uintptr_t)0U); }
+void vCan1HandlerServerTask(void *pvParameters) { (void)pvParameters; prv_ServerTask_Generic((void *)(uintptr_t)1U); }
+void vCan2HandlerServerTask(void *pvParameters) { (void)pvParameters; prv_ServerTask_Generic((void *)(uintptr_t)2U); }
+void vCan3HandlerServerTask(void *pvParameters) { (void)pvParameters; prv_ServerTask_Generic((void *)(uintptr_t)3U); }
+void vCan4HandlerServerTask(void *pvParameters) { (void)pvParameters; prv_ServerTask_Generic((void *)(uintptr_t)4U); }
+void vCan5HandlerServerTask(void *pvParameters) { (void)pvParameters; prv_ServerTask_Generic((void *)(uintptr_t)5U); }
 
 /* ============================================================================
  * Initialisation
  * ========================================================================== */
 /**
- * @brief  Configure CAN message RAM, create FreeRTOS queues and handler tasks.
+ * @brief  Dynamically initialise CAN channels based on SESSION_GetMaxDocks().
  *
- *         Call once at system startup before the scheduler starts.
- *         All six queues are created first; if any fail the function returns
- *         false and no tasks are created (avoids tasks referencing NULL queues).
+ *         Step 1 — Determine active channel count.
+ *           u8N = min(SESSION_GetMaxDocks(), CAN_MAX_HW_CHANNELS).
+ *           Validates SESSION_GetMaxDocks() > 0.
  *
- * @return true   All resources created successfully
- * @return false  One or more queue or task creation failures
+ *         Step 2 — Configure message RAM for channels 0 … u8N-1.
+ *           Calls s_canHwOps[i].pfRamConfig(s_canHwOps[i].pu8MessageRAM).
+ *           No hardcoded peripheral names.
+ *
+ *         Step 3 — Create SW RX + TX queues for channels 0 … u8N-1.
+ *           Aborts (returns false, no tasks started) if any queue fails.
+ *
+ *         Step 4 — Create RX drain task and server task for each channel.
+ *           Channel index is passed as (void*)(uintptr_t)i to the generic
+ *           launcher. No per-channel task functions needed.
+ *
+ *         Step 5 — Store active count in s_u8ActiveChannels.
+ *           Subsequent calls to CAN_GetActiveChannels(), CAN_Write(),
+ *           CAN_WriteStruct(), and vSendCanTxMsgToQueue() all use this.
  */
 bool vCanHandlerInit(void)
 {
     bool bSuccess = true;
 
-    /* --- Configure hardware message RAM --- */
-    CAN0_MessageRAMConfigSet(Can0MessageRAM);
-    CAN1_MessageRAMConfigSet(Can1MessageRAM);
-    CAN2_MessageRAMConfigSet(Can2MessageRAM);
+    /* ── Step 1: Determine active channel count ──────────────────────────── */
+    uint8_t u8MaxDocks = SESSION_GetMaxDocks();
 
-    /* --- Create FreeRTOS queues --- */
-    xCANRXQueueHandler[0] = xQueueCreate(CAN_QUEUE_SIZE, sizeof(CAN_RX_BUFFER));
-    xCANTXQueueHandler[0] = xQueueCreate(CAN_QUEUE_SIZE, sizeof(CAN_TX_BUFFER));
-    xCANRXQueueHandler[1] = xQueueCreate(CAN_QUEUE_SIZE, sizeof(CAN_RX_BUFFER));
-    xCANTXQueueHandler[1] = xQueueCreate(CAN_QUEUE_SIZE, sizeof(CAN_TX_BUFFER));
-    xCANRXQueueHandler[2] = xQueueCreate(CAN_QUEUE_SIZE, sizeof(CAN_RX_BUFFER));
-    xCANTXQueueHandler[2] = xQueueCreate(CAN_QUEUE_SIZE, sizeof(CAN_TX_BUFFER));
-
-    /* Verify all queues were created before starting tasks */
-    for (uint8_t i = 0U; i < CAN_NUM_CHANNELS; i++)
+    if (u8MaxDocks == 0U)
     {
+        SYS_CONSOLE_PRINT("[CanInit] SESSION_GetMaxDocks() returned 0 "
+                          "— at least 1 dock required\r\n");
+        return false;
+    }
+
+    uint8_t u8N = (u8MaxDocks < (uint8_t)CANBUS_MAX)
+                  ? u8MaxDocks
+                  : (uint8_t)CANBUS_MAX;
+
+    SYS_CONSOLE_PRINT("[CanInit] Initialising %u CAN channel(s) "
+                      "(MaxDocks=%u, HW_MAX=%u)\r\n",
+                      (unsigned)u8N,
+                      (unsigned)u8MaxDocks,
+                      (unsigned)CANBUS_MAX);
+
+    /* ── Step 2: Hardware message RAM ───────────────────────────────────── */
+    for (uint8_t i = 0U; i < u8N; i++)
+    {
+        const CAN_HwOps_t *pOps = &s_canHwOps[i];
+
+        if ((pOps->pfRamConfig == NULL) || (pOps->pu8MessageRAM == NULL))
+        {
+            SYS_CONSOLE_PRINT("[CanInit] %s: NULL RAM config pointer\r\n",
+                              pOps->pcName);
+            bSuccess = false;
+            continue;
+        }
+
+        if (!pOps->pfRamConfig(pOps->pu8MessageRAM))
+        {
+            SYS_CONSOLE_PRINT("[CanInit] %s: MessageRAMConfigSet failed\r\n",
+                              pOps->pcName);
+            bSuccess = false;
+        }
+        else
+        {
+            SYS_CONSOLE_PRINT("[CanInit] %s: RAM configured (%lu bytes)\r\n",
+                              pOps->pcName, (unsigned long)pOps->u32RamSize);
+        }
+    }
+
+    if (!bSuccess)
+    {
+        SYS_CONSOLE_PRINT("[CanInit] RAM configuration error(s) — aborting\r\n");
+        return false;
+    }
+
+    /* ── Step 3: SW queues ───────────────────────────────────────────────── */
+    (void)memset(xCANStats, 0, sizeof(xCANStats));
+
+    for (uint8_t i = 0U; i < u8N; i++)
+    {
+        xCANRXQueueHandler[i] = xQueueCreate(CAN_QUEUE_SIZE,
+                                             sizeof(CAN_RX_BUFFER));
+        xCANTXQueueHandler[i] = xQueueCreate(CAN_QUEUE_SIZE,
+                                             sizeof(CAN_TX_BUFFER));
+
         if (xCANRXQueueHandler[i] == NULL)
         {
-            SYS_CONSOLE_PRINT("[CanInit] RX queue creation failed for CAN%u\r\n", (unsigned)i);
+            SYS_CONSOLE_PRINT("[CanInit] %s: RX queue creation failed\r\n",
+                              s_canHwOps[i].pcName);
             bSuccess = false;
         }
         if (xCANTXQueueHandler[i] == NULL)
         {
-            SYS_CONSOLE_PRINT("[CanInit] TX queue creation failed for CAN%u\r\n", (unsigned)i);
+            SYS_CONSOLE_PRINT("[CanInit] %s: TX queue creation failed\r\n",
+                              s_canHwOps[i].pcName);
             bSuccess = false;
         }
     }
@@ -784,72 +943,67 @@ bool vCanHandlerInit(void)
         return false;
     }
 
-    SYS_CONSOLE_PRINT("[CanInit] All queues created successfully\r\n");
+    SYS_CONSOLE_PRINT("[CanInit] All %u queue pair(s) created\r\n",
+                      (unsigned)u8N);
 
-    /* --- Create RX Handler tasks --- */
-    static const struct {
-        TaskFunction_t  pfTask;
-        const char     *pcName;
-        uint16_t        u16Stack;
-    } rxTasks[CAN_NUM_CHANNELS] = {
-        { vCan0RxHandlerTask, "CAN0_RX", CAN0_RX_HANDLER_STACK_DEPTH },
-        { vCan1RxHandlerTask, "CAN1_RX", CAN1_RX_HANDLER_STACK_DEPTH },
-        { vCan2RxHandlerTask, "CAN2_RX", CAN2_RX_HANDLER_STACK_DEPTH },
-    };
-
-    for (uint8_t i = 0U; i < CAN_NUM_CHANNELS; i++)
+    /* ── Step 4: FreeRTOS tasks ──────────────────────────────────────────── */
+    for (uint8_t i = 0U; i < u8N; i++)
     {
-        if (xTaskCreate(rxTasks[i].pfTask,
-                        rxTasks[i].pcName,
-                        rxTasks[i].u16Stack,
-                        NULL,
+        char acTaskName[16];
+
+        /* RX drain task — channel index passed as pvParameters */
+        (void)snprintf(acTaskName, sizeof(acTaskName), "%s_RX",
+                       s_canHwOps[i].pcName);
+
+        if (xTaskCreate(prv_RxHandlerTask_Generic,
+                        acTaskName,
+                        CAN_RX_HANDLER_STACK_DEPTH,
+                        (void *)(uintptr_t)i,
                         CAN_RX_HANDLER_TASK_PRIORITY,
                         NULL) != pdPASS)
         {
-            SYS_CONSOLE_PRINT("[CanInit] %s task creation failed\r\n", rxTasks[i].pcName);
+            SYS_CONSOLE_PRINT("[CanInit] %s: RX task creation failed\r\n",
+                              acTaskName);
             bSuccess = false;
         }
         else
         {
-            SYS_CONSOLE_PRINT("[CanInit] %s task created\r\n", rxTasks[i].pcName);
+            SYS_CONSOLE_PRINT("[CanInit] %s: RX task started\r\n", acTaskName);
         }
-    }
 
-    /* --- Create Server tasks --- */
-    static const struct {
-        TaskFunction_t  pfTask;
-        const char     *pcName;
-    } srvTasks[CAN_NUM_CHANNELS] = {
-        { vCan0HandlerServerTask, "CAN0_SRV" },
-        { vCan1HandlerServerTask, "CAN1_SRV" },
-        { vCan2HandlerServerTask, "CAN2_SRV" },
-    };
+        /* Server task */
+        (void)snprintf(acTaskName, sizeof(acTaskName), "%s_SRV",
+                       s_canHwOps[i].pcName);
 
-    for (uint8_t i = 0U; i < CAN_NUM_CHANNELS; i++)
-    {
-        if (xTaskCreate(srvTasks[i].pfTask,
-                        srvTasks[i].pcName,
+        if (xTaskCreate(prv_ServerTask_Generic,
+                        acTaskName,
                         CAN_SERVER_HANDLER_STACK_DEPTH,
-                        NULL,
+                        (void *)(uintptr_t)i,
                         CAN_SERVER_HANDLER_TASK_PRIORITY,
                         NULL) != pdPASS)
         {
-            SYS_CONSOLE_PRINT("[CanInit] %s task creation failed\r\n", srvTasks[i].pcName);
+            SYS_CONSOLE_PRINT("[CanInit] %s: server task creation failed\r\n",
+                              acTaskName);
             bSuccess = false;
         }
         else
         {
-            SYS_CONSOLE_PRINT("[CanInit] %s task created\r\n", srvTasks[i].pcName);
+            SYS_CONSOLE_PRINT("[CanInit] %s: server task started\r\n",
+                              acTaskName);
         }
     }
 
+    /* ── Step 5: Commit active channel count ─────────────────────────────── */
     if (bSuccess)
     {
-        SYS_CONSOLE_PRINT("[CanInit] Initialisation complete\r\n");
+        s_u8ActiveChannels = u8N;
+        SYS_CONSOLE_PRINT("[CanInit] Initialisation complete. "
+                          "Active channels: %u\r\n", (unsigned)s_u8ActiveChannels);
     }
     else
     {
-        SYS_CONSOLE_PRINT("[CanInit] WARNING: One or more tasks failed to start\r\n");
+        SYS_CONSOLE_PRINT("[CanInit] WARNING: one or more resources failed. "
+                          "Active channels: 0\r\n");
     }
 
     return bSuccess;

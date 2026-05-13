@@ -145,6 +145,15 @@ extern "C" {
 #define FLASH_MAGIC                 (0xDEADBEEFUL) /**< Flash validity token  */
 #define FLASH_ADDRESS               (0x0C0F0000UL) /**< Flash config start addr*/
 
+/* =========================
+ * FLASH CONFIG MAC
+ * ========================= */
+#define MAC_FLASH_ADDRESS      (0x0C0F1000UL)
+
+#define MAC_FLASH_MAGIC        (0x4D414346UL)   /* 'MACF' */
+
+#define FCW_TIMEOUT_CYCLES     (1000000UL)
+
 /* ============================================================================
  * Extern Global Variables
  * (minimised — only expose what other modules genuinely need)
@@ -176,6 +185,13 @@ extern uint16_t serialnum;     /**< Device serial number                      */
  *        The `magic` field must equal FLASH_MAGIC for data to be considered
  *        valid. All other fields are zeroed and re-defaulted if magic fails.
  */
+typedef struct
+{
+    uint8_t u8CompartmentId;
+    uint8_t u8MaxDocks;
+    char cIpAddress[16];     // "xxx.xxx.xxx.xxx" + '\0'
+    char cSubnetMask[16];
+} IOC_Config_t;
 typedef struct __attribute__((packed))
 {
     uint32_t magic;                  /**< Validity token = FLASH_MAGIC        */
@@ -194,10 +210,27 @@ typedef struct __attribute__((packed))
         char     parity;
         uint8_t  stopBits;
     } rs485Config[2];
+    /* IOC configuration */
+    IOC_Config_t iocCfg;   // Added
 } flash_data_t;
 
 extern flash_data_t writeData;  /**< In-RAM mirror of flash config           */
 
+/* =========================
+ * MAC STORAGE STRUCTURE
+ * ========================= */
+
+typedef struct
+{
+    uint32_t magic;
+    uint8_t  mac_last_byte;
+    uint8_t  reserved[3];
+} mac_flash_data_t;
+/* =========================
+ * GLOBAL MAC STORAGE
+ * ========================= */
+
+// extern static mac_flash_data_t gMacData;
 /* ============================================================================
  * TCP Request Frame
  * ========================================================================== */
@@ -233,7 +266,8 @@ typedef enum
     CMD_CHARGING_COMMAND  = 0x03U,
     CMD_EFUSE_COMMAND     = 0x04U,
     CMD_BOOT_MODE_COMMAND = 0x05U,
-    CMD_SOFT_RESET_COMMAND= 0x06U
+    CMD_SOFT_RESET_COMMAND= 0x06U,
+    CMD_COMMISSIONING_COMMAND = 0x07U,
 } CommandID_t;
 
 /* ============================================================================
@@ -391,6 +425,50 @@ bool SERCOM7_I2C_Write(uint16_t address, uint8_t *wrData, uint32_t wrLength);
  * @return true on success
  */
 bool SERCOM7_I2C_Read(uint16_t address, uint8_t *rdData, uint32_t rdLength);
+
+/* =========================
+ * API PROTOTYPES
+ * ========================= */
+
+/**
+ * @brief Initialize MAC system (read flash or load default)
+ *
+ * @return true  MAC read successfully from flash
+ * @return false MAC was invalid, default was used and stored
+ */
+bool MAC_Init(void);
+
+/**
+ * @brief Read MAC from flash into internal buffer
+ *
+ * @return true  valid MAC read
+ * @return false invalid flash, default used
+ */
+bool MAC_ReadFromFlash(void);
+
+/**
+ * @brief Write MAC last byte to flash
+ *
+ * @param lastByte last byte of MAC address
+ * @return true write success
+ * @return false write failed
+ */
+bool MAC_WriteToFlash(uint8_t lastByte);
+
+/**
+ * @brief Get current MAC pointer
+ */
+const uint8_t* MAC_Get(void);
+
+/**
+ * @brief Convert MAC to string format
+ */
+void MAC_ToString(const uint8_t *mac, char *str);
+
+/**
+ * @brief Print MAC on console
+ */
+void MAC_Print(const uint8_t *mac);
 
 #ifdef __cplusplus
 }

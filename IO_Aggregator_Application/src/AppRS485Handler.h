@@ -108,6 +108,78 @@ void RS485_TransmitData_UART8(uint8_t *data, uint16_t length);
  */
 void RS485_TransmitData_UART9(uint8_t *data, uint16_t length);
 
+void RS485_Output_1_Set(void);
+void RS485_Output_1_Clear(void);
+
+void RS485_Output_2_Set(void);
+void RS485_Output_2_Clear(void);
+
+void RS485_Output_3_Set(void);
+void RS485_Output_3_Clear(void);
+
+void RS485_Output_4_Set(void);
+void RS485_Output_4_Clear(void);
+
+void RS485_Output_5_Set(void);
+void RS485_Output_5_Clear(void);
+
+void RS485_Output_6_Set(void);
+void RS485_Output_6_Clear(void);
+
+void RS485_Output_7_Set(void);
+void RS485_Output_7_Clear(void);
+
+void RS485_Output_8_Set(void);
+void RS485_Output_8_Clear(void);
+
+void RS485_Output_9_Set(void);
+void RS485_Output_9_Clear(void);
+
+void RS485_Output_10_Set(void);
+void RS485_Output_10_Clear(void);
+
+void RS485_Output_11_Set(void);
+void RS485_Output_11_Clear(void);
+
+void RS485_Output_12_Set(void);
+void RS485_Output_12_Clear(void);
+
+void RS485_Output_13_Set(void);
+void RS485_Output_13_Clear(void);
+
+void RS485_Output_14_Set(void);
+void RS485_Output_14_Clear(void);
+
+void RS485_Output_15_Set(void);
+void RS485_Output_15_Clear(void);
+
+void RS485_Output_16_Set(void);
+void RS485_Output_16_Clear(void);
+
+void RS485_Output_17_Set(void);
+void RS485_Output_17_Clear(void);
+
+void RS485_Output_18_Set(void);
+void RS485_Output_18_Clear(void);
+
+uint8_t RS485_Output_1_Get(void);
+uint8_t RS485_Output_2_Get(void);
+uint8_t RS485_Output_3_Get(void);
+uint8_t RS485_Output_4_Get(void);
+uint8_t RS485_Output_5_Get(void);
+uint8_t RS485_Output_6_Get(void);
+uint8_t RS485_Output_7_Get(void);
+uint8_t RS485_Output_8_Get(void);
+uint8_t RS485_Output_9_Get(void);
+uint8_t RS485_Output_10_Get(void);
+uint8_t RS485_Output_11_Get(void);
+uint8_t RS485_Output_12_Get(void);
+uint8_t RS485_Output_13_Get(void);
+uint8_t RS485_Output_14_Get(void);
+uint8_t RS485_Output_15_Get(void);
+uint8_t RS485_Output_16_Get(void);
+uint8_t RS485_Output_17_Get(void);
+uint8_t RS485_Output_18_Get(void);
 #endif /* APP_UART_HANDLER_H */
 
 /*******************************************************************************

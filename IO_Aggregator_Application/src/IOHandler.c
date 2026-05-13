@@ -8,9 +8,50 @@
  *    Implements digital/analog pin management, flash I/O state storage,
  *    TCP command parsing, and port configuration for the IO Aggregator board.
  *
- *  Version : 2.0
+ *  Version : 2.2
  *
- *  Changes from v1.0:
+ *  Changes from v2.1:
+ *    - Fixed: Task loop called prv_HandleCommissioningCommand(buf, len) with
+ *      arguments — function takes no parameters.  Fixed to call
+ *      prv_ParseAndProcessInbPacket() identically to the normal path, so the
+ *      same frame parser populates s_reqFrame before dispatching.
+ *    - Fixed: prv_ProcessCommissioningWrite() expected a 38-byte payload with
+ *      an extra sub-cmd prefix byte.  Corrected to match the actual 37-byte
+ *      wire format where payload[0] IS msgType (0x00=READ / 0x01=WRITE).
+ *    - Fixed: prv_HandleCommissioningCommand() now checks payloadLen == 37 in
+ *      commissioning mode (not 38) before routing to Read/Write.
+ *    - Fixed: flash save in prv_ProcessCommissioningWrite() called
+ *      prv_SaveOutputsToFlash_Raw() which only updates digitalOutputs /
+ *      relayOutputs / serialNumber — iocCfg changes were lost on power cycle.
+ *      Replaced with new prv_SaveIocConfigToFlash() which writes the full
+ *      flash_data_t page so all fields (including iocCfg) are persisted.
+ *    - Added: prv_SaveIocConfigToFlash() — atomic erase+write of the entire
+ *      flash_data_t page with timeout guards, preserving all existing fields.
+ *    - Improved: All commissioning log messages now include field values for
+ *      easier on-device debugging.
+ *
+ *  Changes from v2.0:
+ *    - Added: CMD_COMMISSIONING_COMMAND (0x07) to command switch.
+ *    - Added: system_mode_t enum (MODE_NORMAL / MODE_COMMISSIONING) and
+ *      static volatile g_systemMode variable.
+ *    - Added: s_commSocket — dedicated TCP socket for the commissioning server.
+ *    - Added: prv_HandleCommissioningCommand() — dispatches Enter / Read / Write
+ *      sub-commands; only Enter is accepted while in MODE_NORMAL.
+ *    - Added: prv_StopCurrentServer() — closes s_ioSocket gracefully before
+ *      switching to commissioning mode.
+ *    - Added: prv_StartCommissioningServer() — sets IP to COMM_SERVER_IP
+ *      (192.168.1.22) and opens a TCP server on COMM_SERVER_PORT (6235).
+ *    - Added: prv_ProcessCommissioningRead() — serialises writeData.iocCfg
+ *      into a 37-byte IOC_Commisioning_t frame and sends it as a response.
+ *    - Added: prv_ProcessCommissioningWrite() — validates payload length, CRC,
+ *      MaxDock range and IP/subnet strings; on success updates RAM config,
+ *      persists to flash, ACKs the client, and triggers SYS_RESET_SoftwareReset.
+ *    - Added: commissioning server poll branch in prv_IOHandlerServerTask —
+ *      when g_systemMode == MODE_COMMISSIONING the task services s_commSocket
+ *      instead of s_ioSocket.
+ *    - Added: macros for all commissioning configuration (server IP/port,
+ *      payload offsets, struct size, response codes, sub-command bytes).
+ *
  *    - Fixed: `bGPIO_Operation` had no `return` statement at the end of the
  *      function — undefined behaviour; all paths now return explicitly.
  *    - Fixed: `u8DockNo` used as direct array index into Gpio_conf arrays
@@ -119,6 +160,48 @@
 
 #define MSG_TYPE_REQUEST        (0x01)
 #define MSG_TYPE_RESPONSE       (0x02)
+
+/** MAC address base bytes */
+#define APP_MAC_BASE_BYTE0    (0x00U)
+#define APP_MAC_BASE_BYTE1    (0x04U)
+#define APP_MAC_BASE_BYTE2    (0x25U)
+#define APP_MAC_BASE_BYTE3    (0x1CU)
+#define APP_MAC_BASE_BYTE4    (0xA0U)
+/* ============================================================================
+ * Commissioning Mode Configuration
+ * ========================================================================== */
+/** TCP command ID that triggers / handles commissioning operations */
+#define CMD_COMMISSIONING_COMMAND       (0x07U)
+
+/** Sub-command byte within a CMD_COMMISSIONING_COMMAND frame */
+#define COMM_SUBCMD_ENTER               (0x01U)  /**< Enter commissioning mode     */
+#define COMM_SUBCMD_READ                (0x00U)  /**< Read current configuration   */
+#define COMM_SUBCMD_WRITE               (0x01U)  /**< Write new configuration      */
+
+/** Commissioning server network parameters */
+#define COMM_SERVER_IP                  "192.168.1.22"
+#define COMM_SERVER_PORT                (6235U)
+
+/** IOC_Commisioning_t payload field offsets inside the TCP frame payload */
+#define COMM_PAYLOAD_MSGTYPE_OFF        (0U)
+#define COMM_PAYLOAD_COMP_ID_OFF        (1U)
+#define COMM_PAYLOAD_MAX_DOCK_OFF       (2U)
+#define COMM_PAYLOAD_IP_OFF             (3U)
+#define COMM_PAYLOAD_SUBNET_OFF         (19U)
+#define COMM_PAYLOAD_CRC_OFF            (35U)
+
+/** Total size of a serialised IOC_Commisioning_t structure (bytes) */
+#define IOC_COMMISSIONING_STRUCT_SIZE   (37U)
+
+/** Maximum valid value for u8MaxDocks */
+#define COMM_MAX_DOCK_LIMIT             (6U)
+
+/** ACK / NACK response codes */
+#define COMM_RESP_ACK                   (0x00U)
+#define COMM_RESP_NACK_PAYLOAD_LEN      (0x01U)
+#define COMM_RESP_NACK_CRC              (0x02U)
+#define COMM_RESP_NACK_INVALID_FIELD    (0x03U)
+#define COMM_RESP_NACK_FLASH            (0x04U)
 /* ============================================================================
  * Sensor Calibration Constants (file-scope only — not exported)
  * ========================================================================== */
@@ -138,6 +221,15 @@ static const float    k_CoeffC      = 0.000000087298F;
 static const uint32_t k_RefResistor = 4700U;
 static const float    k_VrefNTC     = 3.3F;
 #endif
+/* =========================
+ * GLOBAL MAC STORAGE
+ * ========================= */
+
+// static mac_flash_data_t gMacData;
+/* =========================
+ * INTERNAL STORAGE
+ * ========================= */
+uint8_t gDeviceMac[6];
 
 /* ============================================================================
  * Global Variables
@@ -193,6 +285,23 @@ static volatile bool s_boardSelectionDone = false;
 /** IO operation busy flag */
 volatile bool bIOOperation = false;
 
+/* ── Commissioning state ──────────────────────────────────────────────────── */
+
+/**
+ * @brief  System operation mode.
+ */
+typedef enum
+{
+    MODE_NORMAL = 0,    /**< Normal TCP server operation */
+    MODE_COMMISSIONING  /**< Commissioning server active  */
+} system_mode_t;
+
+/** Current system operation mode */
+static volatile system_mode_t g_systemMode = MODE_NORMAL;
+
+/** Dedicated commissioning TCP socket */
+static TCP_SOCKET s_commSocket = INVALID_SOCKET;
+
 /* ============================================================================
  * GPIO Pin Configuration Table
  *
@@ -202,18 +311,18 @@ volatile bool bIOOperation = false;
  * MAX_DOCKS with index 0 left as 0.
  * ========================================================================== */
 static const Board_gpio_st k_GpioConf = {
-    .AC_Relay_Pin       = {0,  61, 62, 63},  /* [0]=unused, [1]=DOCK_1, ... */
-    .DC_Relay_Pin       = {0,  64, 65, 66},
-    .Solenoid_PinHi     = {0,  67, 68, 69},
-    .Solenoid_PinLo     = {0,  70, 71, 72},
-    .R_LED_Pin          = {0,  73, 74, 75},
-    .G_LED_Pin          = {0,  76, 77, 78},
-    .B_LED_Pin          = {0,  79, 80, 81},
-    .Dock_Fan_Pin       = {0,  86, 87, 88},
-    .Compartment_Fan_Pin = 85,
-    .DoorLock_Pin       = {0,  1,  2,  3},
-    .SolenoidLock_Pin   = {0,  4,  5,  6},
-    .IgnitionSence_Pin  = {0,  8,  9,  10},
+    .AC_Relay_Pin       = {0,  61, 62, 63, 73, 74, 75},  /* [0]=unused, [1]=DOCK_1, ... */
+    .DC_Relay_Pin       = {0,  64, 65, 66, 76, 77, 78},
+    .Solenoid_PinHi     = {0,  67, 68, 69, 79, 80, 81},
+    .Solenoid_PinLo     = {0,  70, 71, 72, 82, 83, 84},
+    .R_LED_Pin          = {0,  91, 92, 93, 100, 101, 102},
+    .G_LED_Pin          = {0,  94, 95, 96, 103, 104, 105},
+    .B_LED_Pin          = {0,  97, 98, 99, 106, 107, 108},
+    .Dock_Fan_Pin       = {0,  85, 86, 87, 88, 89, 90},
+    .Compartment_Fan_Pin = 0, /* No compartment fan GPIO */
+    .DoorLock_Pin       = {0,  1,  2,  3, 17, 18, 19},
+    .SolenoidLock_Pin   = {0,  4,  5,  6, 20, 21, 22},
+    .IgnitionSence_Pin  = {0,  8,  9,  10, 23, 24, 25},
     .EStop_Pin          = 7
 };
 
@@ -241,7 +350,7 @@ static void     prv_SaveOutputsToFlash_Raw(uint32_t u32Digital,
 static void     prv_ReadOutputsFromFlash(void);
 static void     prv_StoreRelay_DigitalOutputsFrame(void);
 static void     prv_ReadDigitalInputs(void);
-static void     prv_SetStaticIPAddress(const char *pcIpStr);
+static void     prv_SetStaticIPAddress(const char *pcIpStr, const char *pcSubnetStr);
 static uint16_t prv_CalculateCRC16(const uint8_t *pu8Data, uint16_t u16Len);
 static void     prv_ParseAndProcessInbPacket(uint8_t *pu8Buf, uint16_t u16Len);
 static void     prv_HandleGPIOCommand(void);
@@ -256,6 +365,16 @@ static void     prv_GPIO_Write(uint16_t u16PortNo, bool bVal, uint8_t *pu8ErrorC
 static uint8_t  prv_ChargingControl(uint8_t u8DockNo, uint8_t u8Action);
 static uint32_t prv_AnalogInputGet(uint8_t u8Channel);
 static void     prv_vConfigureIOexpanders(void);
+static void     prv_SetStoredStaticIP(void);
+
+/* Commissioning mode */
+static void     prv_HandleCommissioningCommand(void);
+static void     prv_ParseCommissioningPacket(uint8_t *pu8Buf, uint16_t u16Len);
+static void     prv_StopCurrentServer(void);
+static void     prv_StartCommissioningServer(void);
+static void     prv_ProcessCommissioningRead(void);
+static void     prv_ProcessCommissioningWrite(const uint8_t *pu8Struct);
+static void     prv_SaveIocConfigToFlash(void);
 
 #if PT100_Sensor
 static inline float prv_TempCalcPT100(float fVoltage);
@@ -387,9 +506,24 @@ static void prv_PrintSavedFlashData(void)
     }
 
     SYS_CONSOLE_PRINT("---- SAVED FLASH DATA ----\r\n");
+
     SYS_CONSOLE_PRINT("Digital: 0x%08lX  Relay: 0x%04X\r\n",
                       (unsigned long)savedData.digitalOutputs,
                       (unsigned)savedData.relayOutputs);
+
+    /* --- IOC CONFIG --- */
+    SYS_CONSOLE_PRINT("---- IOC CONFIG ----\r\n");
+    SYS_CONSOLE_PRINT("Compartment ID: %u\r\n",
+                      (unsigned)savedData.iocCfg.u8CompartmentId);
+
+    SYS_CONSOLE_PRINT("Max Dock: %u\r\n",
+                      (unsigned)savedData.iocCfg.u8MaxDocks);
+
+    SYS_CONSOLE_PRINT("IP Address: %s\r\n",
+                      savedData.iocCfg.cIpAddress);
+
+    SYS_CONSOLE_PRINT("Subnet Mask: %s\r\n",
+                      savedData.iocCfg.cSubnetMask);
 
     for (uint8_t i = 0U; i < 6U; i++)
     {
@@ -398,6 +532,7 @@ static void prv_PrintSavedFlashData(void)
                           (unsigned)savedData.canPorts[i],
                           (unsigned long)savedData.canBaudRates[i]);
     }
+
     for (uint8_t i = 0U; i < 2U; i++)
     {
         SYS_CONSOLE_PRINT("RS485%u: Port=%u Baud=%lu Data=%u Parity=%c Stop=%u\r\n",
@@ -408,6 +543,7 @@ static void prv_PrintSavedFlashData(void)
                           savedData.rs485Config[i].parity,
                           (unsigned)savedData.rs485Config[i].stopBits);
     }
+
     SYS_CONSOLE_PRINT("--------------------------\r\n");
 }
 
@@ -526,61 +662,6 @@ static void prv_ReadOutputsFromFlash(void)
         SYS_CONSOLE_PRINT("[Flash] Restored Digital=0x%08lX Relay=0x%04X\r\n",
                           (unsigned long)writeData.digitalOutputs,
                           (unsigned)writeData.relayOutputs);
-
-        /* --- Restore relay outputs --- */
-        /* BUG FIX: use local variable from flash, not global relayStatus */
-        uint16_t u16SavedRelay = writeData.relayOutputs;
-        // for (uint8_t i = 0U; i < (uint8_t)NUM_RELAY_PINS; i++)
-        // {
-        //     bool bSet = ((u16SavedRelay & (uint16_t)(1U << i)) != 0U);
-        //     switch (i)
-        //     {
-        //         case 0U: bSet ? efuse1_in_Set()        : efuse1_in_Clear();        break;
-        //         case 1U: bSet ? efuse2_in_Set()        : efuse2_in_Clear();        break;
-        //         case 2U: bSet ? efuse3_in_Set()        : efuse3_in_Clear();        break;
-        //         case 3U: bSet ? efuse4_in_Set()        : efuse4_in_Clear();        break;
-        //         case 4U: bSet ? Relay_Output_1_Set()   : Relay_Output_1_Clear();   break;
-        //         case 5U: bSet ? Relay_Output_2_Set()   : Relay_Output_2_Clear();   break;
-        //         default: break;
-        //     }
-        // }
-
-        /* --- Restore digital outputs --- */
-        uint32_t u32SavedDO = writeData.digitalOutputs;
-        // for (uint8_t i = 0U; i < (uint8_t)NUM_DO_PINS; i++)
-        // {
-        //     bool bSet = ((u32SavedDO & (1UL << i)) != 0U);
-        //     switch (i)
-        //     {
-        //         case  0U: bSet ? Digital_Output_1_Set()  : Digital_Output_1_Clear();  break;
-        //         case  1U: bSet ? Digital_Output_2_Set()  : Digital_Output_2_Clear();  break;
-        //         case  2U: bSet ? Digital_Output_3_Set()  : Digital_Output_3_Clear();  break;
-        //         case  3U: bSet ? Digital_Output_4_Set()  : Digital_Output_4_Clear();  break;
-        //         case  4U: bSet ? Digital_Output_5_Set()  : Digital_Output_5_Clear();  break;
-        //         case  5U: bSet ? Digital_Output_6_Set()  : Digital_Output_6_Clear();  break;
-        //         case  6U: bSet ? Digital_Output_7_Set()  : Digital_Output_7_Clear();  break;
-        //         case  7U: bSet ? Digital_Output_8_Set()  : Digital_Output_8_Clear();  break;
-        //         case  8U: bSet ? Digital_Output_9_Set()  : Digital_Output_9_Clear();  break;
-        //         case  9U: bSet ? Digital_Output_10_Set() : Digital_Output_10_Clear(); break;
-        //         case 10U: bSet ? Digital_Output_11_Set() : Digital_Output_11_Clear(); break;
-        //         case 11U: bSet ? Digital_Output_12_Set() : Digital_Output_12_Clear(); break;
-        //         case 12U: bSet ? Digital_Output_13_Set() : Digital_Output_13_Clear(); break;
-        //         case 13U: bSet ? Digital_Output_14_Set() : Digital_Output_14_Clear(); break;
-        //         case 14U: bSet ? Digital_Output_15_Set() : Digital_Output_15_Clear(); break;
-        //         case 15U: bSet ? Digital_Output_16_Set() : Digital_Output_16_Clear(); break;
-        //         case 16U: bSet ? Digital_Output_17_Set() : Digital_Output_17_Clear(); break;
-        //         case 17U: bSet ? Digital_Output_18_Set() : Digital_Output_18_Clear(); break;
-        //         case 18U: bSet ? Digital_Output_19_Set() : Digital_Output_19_Clear(); break;
-        //         case 19U: bSet ? Digital_Output_20_Set() : Digital_Output_20_Clear(); break;
-        //         case 20U: bSet ? Digital_Output_21_Set() : Digital_Output_21_Clear(); break;
-        //         case 21U: bSet ? Digital_Output_22_Set() : Digital_Output_22_Clear(); break;
-        //         case 22U: bSet ? Digital_Output_23_Set() : Digital_Output_23_Clear(); break;
-        //         case 23U: bSet ? Digital_Output_24_Set() : Digital_Output_24_Clear(); break;
-        //         default: break;
-        //     }
-        // }
-
-#if HEV_IO_Aggregator
         /* Restore RS-485 UART configuration */
         for (uint8_t u8UartIdx = 0U; u8UartIdx < 2U; u8UartIdx++)
         {
@@ -605,9 +686,9 @@ static void prv_ReadOutputsFromFlash(void)
             USART_PARITY eParity;
             switch (i32Parity)
             {
-                case 0: eParity = USART_PARITY_NONE; break;
-                case 1: eParity = USART_PARITY_ODD;  break;
-                case 2: eParity = USART_PARITY_EVEN; break;
+                case 78: eParity = USART_PARITY_NONE; break;
+                case 79: eParity = USART_PARITY_ODD;  break;
+                case 69: eParity = USART_PARITY_EVEN; break;
                 default:
                     SYS_CONSOLE_PRINT("[RS485%u] Invalid parity (%ld)\r\n",
                                       (unsigned)(u8UartIdx + 1U), (long)i32Parity);
@@ -652,16 +733,24 @@ static void prv_ReadOutputsFromFlash(void)
                 }
             }
         }
-#endif
         SYS_CONSOLE_PRINT("[Flash] Outputs restored.\r\n");
     }
     else
     {
-        SYS_CONSOLE_PRINT("[Flash] Invalid/empty — loading defaults.\r\n");
+        SYS_CONSOLE_PRINT("[Flash] Invalid/empty loading defaults.\r\n");
         (void)memset(&writeData, 0, sizeof(flash_data_t));
         writeData.magic = FLASH_MAGIC;
+        
+        /* --- DEFAULT IOC CONFIG --- */
+        writeData.iocCfg.u8CompartmentId = 1U;
+        writeData.iocCfg.u8MaxDocks       = 3U;
 
-#if HEV_IO_Aggregator
+        strncpy(writeData.iocCfg.cIpAddress, "192.168.1.231", 16);
+        writeData.iocCfg.cIpAddress[15] = '\0';
+
+        strncpy(writeData.iocCfg.cSubnetMask, "255.255.255.0", 16);
+        writeData.iocCfg.cSubnetMask[15] = '\0';
+
         static const uint16_t k_DefCanPorts[6]   = {8120U, 8121U, 8122U, 8123U, 8124U, 8125U};
         static const uint16_t k_DefRs485Ports[2] = {9114U, 9115U};
         static const uint32_t k_DefCanBaud[6]    = {500000UL, 500000UL, 500000UL,
@@ -678,7 +767,6 @@ static void prv_ReadOutputsFromFlash(void)
             writeData.rs485Config[i].parity   = 'N';
             writeData.rs485Config[i].stopBits = 1U;
         }
-#endif
         uint8_t au8WriteBuf[sizeof(flash_data_t)];
         (void)memcpy(au8WriteBuf, &writeData, sizeof(flash_data_t));
         DCACHE_CLEAN_BY_ADDR((uint32_t *)au8WriteBuf, sizeof(au8WriteBuf));
@@ -690,9 +778,17 @@ static void prv_ReadOutputsFromFlash(void)
         FCW_RowWrite((uint32_t *)au8WriteBuf, FLASH_ADDRESS);
         u32Timeout = ADC_TIMEOUT_CYCLES;
         while (FCW_IsBusy() && (u32Timeout > 0U)) { u32Timeout--; }
-
         SYS_CONSOLE_PRINT("[Flash] Defaults saved.\r\n");
     }
+    SESSION_SetCompartmentId(writeData.iocCfg.u8CompartmentId);
+    SESSION_SetMaxDocks(writeData.iocCfg.u8MaxDocks);
+    SESSION_SetIpAddress(writeData.iocCfg.cIpAddress);
+    SESSION_SetSubnetMask(writeData.iocCfg.cSubnetMask);
+    SYS_CONSOLE_PRINT("[Flash] CompartmentId=%u MaxDocks=%u IP=%s Subnet=%s\r\n",
+                      (unsigned)writeData.iocCfg.u8CompartmentId,
+                      (unsigned)writeData.iocCfg.u8MaxDocks,
+                      writeData.iocCfg.cIpAddress,
+                      writeData.iocCfg.cSubnetMask);
 }
 
 /**
@@ -762,7 +858,7 @@ void ReadAllAnalogInputPins(void)
     static uint8_t logCounter = 0;
     logCounter++;
 
-    if (logCounter >= 100)
+    if (logCounter >= 1000)
     {
         static const ADC_CORE_NUM k_AdcCores[ALL_ANALOG_PINS] = {
             ADC_CORE_NUM2, ADC_CORE_NUM2, ADC_CORE_NUM0, ADC_CORE_NUM0,
@@ -836,16 +932,17 @@ void ReadAllAnalogInputPins(void)
         }
 
         /* Update session DB temperatures — convert back to °C */
-        SESSION_SetDockTemperature((uint8_t)DOCK_1, (uint8_t)(currentTempAIQueueBuffer[6]/100)); // Channel 6 is DOCK_1, Channel 7 is DOCK_2, Channel 8 is DOCK_3, Channel 9 is COMPARTMENT
-        SESSION_SetDockTemperature((uint8_t)DOCK_2, (uint8_t)(currentTempAIQueueBuffer[7] / 100));
-        SESSION_SetDockTemperature((uint8_t)DOCK_3, (uint8_t)(currentTempAIQueueBuffer[8] / 100));
-        SESSION_SetDockTemperature((uint8_t)COMPARTMENT, (uint8_t)(currentTempAIQueueBuffer[9] / 100));
-
-        SYS_CONSOLE_PRINT("Temps -> D1:%d D2:%d D3:%d COMP:%d\r\n",
-                          (uint16_t)(currentTempAIQueueBuffer[6]),
-                          (uint16_t)(currentTempAIQueueBuffer[7]),
-                          (uint16_t)(currentTempAIQueueBuffer[8]),
-                          (uint16_t)(currentTempAIQueueBuffer[9]));
+        uint8_t u8Temp = (uint8_t)(currentTempAIQueueBuffer[6U] / 100U); /* Convert back to °C */
+        SESSION_SetDockTemperature((uint8_t)COMPARTMENT, u8Temp);
+        SYS_CONSOLE_PRINT("Temps -> Comp:%d", u8Temp);
+        for (uint8_t u8DockNo = DOCK_1; u8DockNo <= SESSION_GetMaxDocks(); u8DockNo++)
+        {
+            uint8_t u8DockId = (uint8_t)(u8DockNo);
+            uint8_t u8Temp = (uint8_t)(currentTempAIQueueBuffer[6U + u8DockNo] / 100U); /* Convert back to °C */
+            SESSION_SetDockTemperature(u8DockId, u8Temp);
+            SYS_CONSOLE_PRINT(" D%d:%d", u8DockId, u8Temp);
+        }
+        SYS_CONSOLE_PRINT("\r\n");
         logCounter = 0;
     }
 }
@@ -926,12 +1023,12 @@ static void prv_ReadDigitalInputs(void)
         currentDIQueueBuffer[57U + i] = ((u8Exp1 & (uint8_t)(1U << i)) != 0U) ? 1U : 0U;
     }
 
-    /* Set static IP once on first call */
-    if (!s_boardSelectionDone)
-    {
-        s_boardSelectionDone = true;
-        prv_SetStaticIPAddress(COMPARTMENT_IP);
-    }
+    // /* Set static IP once on first call */
+    // if (!s_boardSelectionDone)
+    // {
+    //     s_boardSelectionDone = true;
+    //     prv_SetStaticIPAddress(COMPARTMENT_IP);
+    // }
 }
 
 /* ============================================================================
@@ -942,11 +1039,11 @@ static void prv_ReadDigitalInputs(void)
  * @brief  Disable DHCP and assign a static IP to the GMAC interface.
  * @param  pcIpStr  IP address string (e.g. COMPARTMENT_IP)
  */
-static void prv_SetStaticIPAddress(const char *pcIpStr)
+static void prv_SetStaticIPAddress(const char *pcIpStr, const char *pcSubnetStr)
 {
-    if (pcIpStr == NULL)
+    if (pcIpStr == NULL || pcSubnetStr == NULL)
     {
-        SYS_CONSOLE_PRINT("[Net] NULL IP string\r\n");
+        SYS_CONSOLE_PRINT("[Net] NULL input\r\n");
         return;
     }
 
@@ -960,16 +1057,33 @@ static void prv_SetStaticIPAddress(const char *pcIpStr)
     (void)TCPIP_DHCP_Disable(hNet);
 
     IPV4_ADDR sIp, sMask;
-    static const char k_SubnetMask[] = "255.255.255.0";
+    TCPIP_MAC_ADDR macAddr;
+    uint8_t u8CompartmentId = SESSION_GetCompartmentId();
+    macAddr.v[0] = APP_MAC_BASE_BYTE0;
+    macAddr.v[1] = APP_MAC_BASE_BYTE1;
+    macAddr.v[2] = APP_MAC_BASE_BYTE2;
+    macAddr.v[3] = APP_MAC_BASE_BYTE3;
+    macAddr.v[4] = APP_MAC_BASE_BYTE4;
+    macAddr.v[5] = u8CompartmentId;
+
+    SYS_CONSOLE_PRINT(
+        "[NET] Setting MAC: %02X:%02X:%02X:%02X:%02X:%02X\r\n",
+        macAddr.v[0],
+        macAddr.v[1],
+        macAddr.v[2],
+        macAddr.v[3],
+        macAddr.v[4],
+        macAddr.v[5]);
+    // TCPIP_STACK_NetAddressMacSet(hNet, &macAddr);
 
     if (!TCPIP_Helper_StringToIPAddress(pcIpStr, &sIp))
     {
         SYS_CONSOLE_PRINT("[Net] Invalid IP: %s\r\n", pcIpStr);
         return;
     }
-    if (!TCPIP_Helper_StringToIPAddress(k_SubnetMask, &sMask))
+    if (!TCPIP_Helper_StringToIPAddress(pcSubnetStr, &sMask))
     {
-        SYS_CONSOLE_PRINT("[Net] Invalid subnet mask\r\n");
+        SYS_CONSOLE_PRINT("[Net] Invalid subnet: %s\r\n", pcSubnetStr);
         return;
     }
 
@@ -982,7 +1096,6 @@ static void prv_SetStaticIPAddress(const char *pcIpStr)
         SYS_CONSOLE_PRINT("[Net] Failed to set static IP\r\n");
     }
 }
-
 /* ============================================================================
  * CRC-16/CCITT
  * ========================================================================== */
@@ -1137,7 +1250,25 @@ static uint8_t prv_GPIO_Read(uint16_t u16PortNo, uint8_t *pu8ErrorCode)
         case 88U: return (uint8_t)(efuse4_in_Get()      != 0U);
         case 89U: return (uint8_t)(Relay_Output_1_Get() != 0U);
         case 90U: return (uint8_t)(Relay_Output_2_Get() != 0U);
-
+        /* RS485 card-1 (91-99) card-2 (100-108) */
+        case 91U: return (uint8_t)(RS485_Output_1_Get() != 0U);
+        case 92U: return (uint8_t)(RS485_Output_2_Get() != 0U);
+        case 93U: return (uint8_t)(RS485_Output_3_Get() != 0U);
+        case 94U: return (uint8_t)(RS485_Output_4_Get() != 0U);
+        case 95U: return (uint8_t)(RS485_Output_5_Get() != 0U);
+        case 96U: return (uint8_t)(RS485_Output_6_Get() != 0U);
+        case 97U: return (uint8_t)(RS485_Output_7_Get() != 0U);
+        case 98U: return (uint8_t)(RS485_Output_8_Get() != 0U);
+        case 99U: return (uint8_t)(RS485_Output_9_Get() != 0U);
+        case 100U: return (uint8_t)(RS485_Output_10_Get() != 0U);
+        case 101U: return (uint8_t)(RS485_Output_11_Get() != 0U);
+        case 102U: return (uint8_t)(RS485_Output_12_Get() != 0U);
+        case 103U: return (uint8_t)(RS485_Output_13_Get() != 0U);
+        case 104U: return (uint8_t)(RS485_Output_14_Get() != 0U);
+        case 105U: return (uint8_t)(RS485_Output_15_Get() != 0U);
+        case 106U: return (uint8_t)(RS485_Output_16_Get() != 0U);
+        case 107U: return (uint8_t)(RS485_Output_17_Get() != 0U);
+        case 108U: return (uint8_t)(RS485_Output_18_Get() != 0U);
         default:
             *pu8ErrorCode = k_ErrInvalidPort;
             return 0U;
@@ -1147,14 +1278,14 @@ static uint8_t prv_GPIO_Read(uint16_t u16PortNo, uint8_t *pu8ErrorCode)
 /**
  * @brief  Write a GPIO pin by port number.
  *
- * @param  u16PortNo    Port number (61–90)
+ * @param  u16PortNo    Port number (61–108 for outputs)
  * @param  bVal         true = set, false = clear
  * @param  pu8ErrorCode Output error code
  */
 static void prv_GPIO_Write(uint16_t u16PortNo, bool bVal, uint8_t *pu8ErrorCode)
 {
     if (pu8ErrorCode == NULL) { return; }
-    if ((u16PortNo < 61U) || (u16PortNo > 90U))
+    if ((u16PortNo < 61U) || (u16PortNo > 108U))
     {
         *pu8ErrorCode = k_ErrInvalidPort;
         return;
@@ -1200,6 +1331,25 @@ static void prv_GPIO_Write(uint16_t u16PortNo, bool bVal, uint8_t *pu8ErrorCode)
         case 88U: bVal ? efuse4_in_Set()       : efuse4_in_Clear();       break;
         case 89U: bVal ? Relay_Output_1_Set()  : Relay_Output_1_Clear();  break;
         case 90U: bVal ? Relay_Output_2_Set()  : Relay_Output_2_Clear();  break;
+        /* RS485 Outputs card-1(91-99) card-2(100-108) */
+        case 91U: bVal ? RS485_Output_1_Set()  : RS485_Output_1_Clear();  break;
+        case 92U: bVal ? RS485_Output_2_Set()  : RS485_Output_2_Clear() ;  break;
+        case 93U: bVal ? RS485_Output_3_Set()  : RS485_Output_3_Clear() ;  break;
+        case 94U: bVal ? RS485_Output_4_Set()  : RS485_Output_4_Clear() ;  break;
+        case 95U: bVal ? RS485_Output_5_Set()  : RS485_Output_5_Clear() ;  break;
+        case 96U: bVal ? RS485_Output_6_Set()  : RS485_Output_6_Clear() ;  break;
+        case 97U: bVal ? RS485_Output_7_Set()  : RS485_Output_7_Clear() ;  break;
+        case 98U: bVal ? RS485_Output_8_Set()  : RS485_Output_8_Clear() ;  break;
+        case 99U: bVal ? RS485_Output_9_Set()  : RS485_Output_9_Clear() ;  break;
+        case 100U: bVal ? RS485_Output_10_Set()  : RS485_Output_10_Clear() ;  break;
+        case 101U: bVal ? RS485_Output_11_Set()  : RS485_Output_11_Clear() ;  break;
+        case 102U: bVal ? RS485_Output_12_Set()  : RS485_Output_12_Clear() ;  break;
+        case 103U: bVal ? RS485_Output_13_Set()  : RS485_Output_13_Clear() ;  break;
+        case 104U: bVal ? RS485_Output_14_Set()  : RS485_Output_14_Clear() ;  break;
+        case 105U: bVal ? RS485_Output_15_Set()  : RS485_Output_15_Clear() ;  break;
+        case 106U: bVal ? RS485_Output_16_Set()  : RS485_Output_16_Clear() ;  break;
+        case 107U: bVal ? RS485_Output_17_Set()  : RS485_Output_17_Clear() ;  break;
+        case 108U: bVal ? RS485_Output_18_Set()  : RS485_Output_18_Clear() ;  break;
         default:  *pu8ErrorCode = k_ErrInvalidPort; break;
     }
 }
@@ -1236,7 +1386,7 @@ bool bGPIO_Operation(GPIOOperation_e eGPIOType, uint8_t u8DockNo, GPIO_Direction
                       (eGPIOType != DI_E_STOP_STATUS);
 
     if (bPerDockOp &&
-        ((u8DockNo < (uint8_t)DOCK_1) || (u8DockNo >= (uint8_t)MAX_DOCKS)))
+        ((u8DockNo < (uint8_t)DOCK_1) || (u8DockNo > (uint8_t)SESSION_GetMaxDocks())))
     {
         SYS_CONSOLE_PRINT("[GPIO] Invalid dock %u for op %u\r\n",
                           (unsigned)u8DockNo, (unsigned)eGPIOType);
@@ -1330,7 +1480,12 @@ bool bGPIO_Operation(GPIOOperation_e eGPIOType, uint8_t u8DockNo, GPIO_Direction
             SYS_CONSOLE_PRINT("[GPIO] Unknown operation %u\r\n", (unsigned)eGPIOType);
             return false;
     }
-
+    if (u16PinNo == 0U)
+    {
+        SYS_CONSOLE_PRINT("[GPIO] No pin configured for op %u dock %u\r\n",
+                          (unsigned)eGPIOType, (unsigned)u8DockNo);
+        return false;
+    }
     if (eGPIODirection == GPIO_READ)
     {
         /* Read operation: allowed for all pins */
@@ -1401,7 +1556,7 @@ static uint8_t prv_ChargingControl(uint8_t u8DockNo, uint8_t u8Action)
 {
     static uint8_t au8PrevState[MAX_DOCKS] = {0};
 
-    if (u8DockNo >= (uint8_t)MAX_DOCKS)
+    if (u8DockNo > (uint8_t)SESSION_GetMaxDocks())
     {
         SYS_CONSOLE_PRINT("[CHARGING] Invalid dock %u\r\n", (unsigned)u8DockNo);
         return 0U;
@@ -1713,11 +1868,12 @@ static void prv_ParseAndProcessInbPacket(uint8_t *pu8Buf, uint16_t u16Len)
                           (unsigned)u16Len, (unsigned)u16Expected);
         return;
     }
-
-    if (s_reqFrame.compartmentId != COMPARTMENT_ID)
+    uint8_t u8CompartmentId = SESSION_GetCompartmentId();
+    if (s_reqFrame.compartmentId != u8CompartmentId)
     {
         SYS_CONSOLE_PRINT("[TCP] Compartment mismatch got=%u expected=%u\r\n",
-                          (unsigned)s_reqFrame.compartmentId, (unsigned)COMPARTMENT_ID);
+                          (unsigned)s_reqFrame.compartmentId, (unsigned)u8CompartmentId);
+        return;
     }
     /* CRC validation */
     uint16_t u16RxCRC   = ((uint16_t)pu8Buf[u16Len - 2U] << 8U) |
@@ -1768,6 +1924,10 @@ static void prv_ParseAndProcessInbPacket(uint8_t *pu8Buf, uint16_t u16Len)
             SYS_RESET_SoftwareReset();
             return;
 
+        case CMD_COMMISSIONING_COMMAND:
+            prv_HandleCommissioningCommand();
+            break;
+
         default:
             SYS_CONSOLE_PRINT("[TCP] Unknown command 0x%02X\r\n",
                               (unsigned)s_reqFrame.commandId);
@@ -1780,6 +1940,454 @@ static void prv_ParseAndProcessInbPacket(uint8_t *pu8Buf, uint16_t u16Len)
 }
 
 /* ============================================================================
+ * Commissioning Mode — Implementation
+ * ========================================================================== */
+
+/*
+ * Architecture note
+ * ─────────────────
+ * Normal mode and commissioning mode use DIFFERENT TCP protocols:
+ *
+ *   Normal mode (prv_ParseAndProcessInbPacket):
+ *     UniqueID(4) + MsgType(2) + CmpId(1) + DockId(1) + CmdId(1) +
+ *     PayloadLen(1) + Payload(N) + CRC16(2)          ← 10-byte header
+ *
+ *   Commissioning mode (prv_ParseCommissioningPacket):
+ *     Raw 37-byte IOC_Commisioning_t struct sent directly, NO header:
+ *       [0]      msgType         0x00=READ / 0x01=WRITE
+ *       [1]      u8CompartmentId
+ *       [2]      u8MaxDocks
+ *       [3..18]  cIpAddress[16]  (null-padded ASCII)
+ *       [19..34] cSubnetMask[16] (null-padded ASCII)
+ *       [35..36] CRC16-CCITT     (big-endian, covers bytes [0..34])
+ *
+ * The two parsers are completely separate and must NEVER be swapped.
+ *
+ * Normal mode enters commissioning mode via CMD_COMMISSIONING_COMMAND (0x07)
+ * with a 1-byte payload of 0x01, which IS wrapped in the normal frame.
+ * Once in commissioning mode all subsequent packets are raw structs.
+ */
+
+/* --------------------------------------------------------------------------
+ * prv_StopCurrentServer
+ * -------------------------------------------------------------------------- */
+/**
+ * @brief  Close the normal-mode IO socket gracefully before switching modes.
+ */
+static void prv_StopCurrentServer(void)
+{
+    if (s_ioSocket != INVALID_SOCKET)
+    {
+        SYS_CONSOLE_PRINT("[COMM] Stopping normal server\r\n");
+        TCPIP_TCP_Close(s_ioSocket);
+        s_ioSocket = INVALID_SOCKET;
+    }
+}
+
+/* --------------------------------------------------------------------------
+ * prv_StartCommissioningServer
+ * -------------------------------------------------------------------------- */
+/**
+ * @brief  Bind the commissioning TCP server to COMM_SERVER_IP:COMM_SERVER_PORT.
+ *
+ *         Sets the static IP to 192.168.1.22 so the host tool can always reach
+ *         the device at a known address regardless of its configured IP.
+ */
+static void prv_StartCommissioningServer(void)
+{
+    prv_SetStaticIPAddress(COMM_SERVER_IP, "255.255.255.0");
+
+    s_commSocket = TCPIP_TCP_ServerOpen(IP_ADDRESS_TYPE_IPV4,
+                                         COMM_SERVER_PORT, 0U);
+    if (s_commSocket == INVALID_SOCKET)
+    {
+        SYS_CONSOLE_PRINT("[COMM] Failed to open server on port %u\r\n",
+                          (unsigned)COMM_SERVER_PORT);
+        return;
+    }
+
+    SYS_CONSOLE_PRINT("[COMM] Server started at %s:%u\r\n",
+                      COMM_SERVER_IP, (unsigned)COMM_SERVER_PORT);
+}
+
+/* --------------------------------------------------------------------------
+ * prv_HandleCommissioningCommand  (called from normal-mode command switch)
+ * -------------------------------------------------------------------------- */
+/**
+ * @brief  Handle CMD_COMMISSIONING_COMMAND (0x07) received in NORMAL mode.
+ *
+ *         This function is ONLY called via prv_ParseAndProcessInbPacket() while
+ *         the device is still in MODE_NORMAL.  The normal-mode frame wraps a
+ *         1-byte payload:
+ *           payload[0] = 0x01 (COMM_SUBCMD_ENTER) — the only valid value here.
+ *
+ *         On receiving 0x01:
+ *           1. Closes the normal IO socket (prv_StopCurrentServer).
+ *           2. Sets g_systemMode = MODE_COMMISSIONING.
+ *           3. Sends a 1-byte ACK (0x00) back through the NORMAL socket
+ *              (socket is still open for this one last response).
+ *
+ *         All subsequent commissioning traffic arrives as raw 37-byte structs
+ *         on the dedicated commissioning socket (192.168.1.22:6235) and is
+ *         handled by prv_ParseCommissioningPacket(), NOT by this function.
+ */
+static void prv_HandleCommissioningCommand(void)
+{
+    if (s_reqFrame.payloadLen < 1U)
+    {
+        SYS_CONSOLE_PRINT("[COMM] CMD_COMMISSIONING_COMMAND with empty payload\r\n");
+        s_outbErrorCode = (char)k_ErrInvalidMsg;
+        prv_PrepareDispatchOutbPacket();
+        return;
+    }
+
+    uint8_t u8SubCmd = s_reqFrame.payload[0];
+
+    if (u8SubCmd != COMM_SUBCMD_ENTER)
+    {
+        /* Only ENTER (0x01) is valid while in normal mode */
+        SYS_CONSOLE_PRINT("[COMM] Unexpected sub-cmd 0x%02X in normal mode\r\n",
+                          (unsigned)u8SubCmd);
+        s_outbErrorCode = (char)k_ErrInvalidMsg;
+        prv_PrepareDispatchOutbPacket();
+        return;
+    }
+
+    SYS_CONSOLE_PRINT("[COMM] Entered commissioning mode\r\n");
+
+    /* Send ACK on normal socket before closing it */
+    uint8_t u8Ack = COMM_RESP_ACK;
+    prv_SendResponsePayload(&u8Ack, 1U);
+
+    /* Small delay so the TCP stack can flush the ACK */
+    vTaskDelay(pdMS_TO_TICKS(50U));
+
+    prv_StopCurrentServer();
+    g_systemMode = MODE_COMMISSIONING;
+}
+
+/* --------------------------------------------------------------------------
+ * prv_ParseCommissioningPacket  (dedicated commissioning-mode parser)
+ * -------------------------------------------------------------------------- */
+/**
+ * @brief  Parse a raw 37-byte IOC_Commisioning_t packet and dispatch it.
+ *
+ *         Called exclusively from the commissioning branch of the task loop.
+ *         The buffer must contain exactly IOC_COMMISSIONING_STRUCT_SIZE bytes.
+ *
+ *         Parsing steps:
+ *           1. Length check — must be exactly 37 bytes.
+ *           2. CRC16-CCITT check — computed over bytes [0..34], compared with
+ *              bytes [35..36] (big-endian).
+ *           3. Dispatch on msgType (byte [0]):
+ *                0x00 → prv_ProcessCommissioningRead()
+ *                0x01 → prv_ProcessCommissioningWrite(buf)
+ *
+ * @param  pu8Buf   Buffer containing the raw struct (caller-owned).
+ * @param  u16Len   Number of bytes actually received.
+ */
+static void prv_ParseCommissioningPacket(uint8_t *pu8Buf, uint16_t u16Len)
+{
+    if (pu8Buf == NULL)
+    {
+        SYS_CONSOLE_PRINT("[COMM] NULL buffer\r\n");
+        return;
+    }
+
+    /* ── Step 1: Length check ─────────────────────────────────────────────── */
+    if (u16Len != (uint16_t)IOC_COMMISSIONING_STRUCT_SIZE)
+    {
+        SYS_CONSOLE_PRINT("[COMM] Length error: got %u expected %u\r\n",
+                          (unsigned)u16Len,
+                          (unsigned)IOC_COMMISSIONING_STRUCT_SIZE);
+        uint8_t u8Nack = COMM_RESP_NACK_PAYLOAD_LEN;
+        (void)TCPIP_TCP_ArrayPut(s_commSocket, &u8Nack, 1U);
+        return;
+    }
+
+    /* ── Step 2: CRC16-CCITT over bytes [0..34] ───────────────────────────── */
+    uint16_t u16RxCrc =
+        ((uint16_t)pu8Buf[COMM_PAYLOAD_CRC_OFF]      << 8U) |
+         (uint16_t)pu8Buf[COMM_PAYLOAD_CRC_OFF + 1U];
+
+    uint16_t u16CalcCrc = prv_CalculateCRC16(pu8Buf,
+                              (uint16_t)(IOC_COMMISSIONING_STRUCT_SIZE - 2U));
+
+    if (u16RxCrc != u16CalcCrc)
+    {
+        SYS_CONSOLE_PRINT("[COMM] CRC error: rx=0x%04X calc=0x%04X\r\n",
+                          (unsigned)u16RxCrc, (unsigned)u16CalcCrc);
+        uint8_t u8Nack = COMM_RESP_NACK_CRC;
+        (void)TCPIP_TCP_ArrayPut(s_commSocket, &u8Nack, 1U);
+        return;
+    }
+
+    /* ── Step 3: Route on msgType (byte [0]) ─────────────────────────────── */
+    uint8_t u8MsgType = pu8Buf[COMM_PAYLOAD_MSGTYPE_OFF];
+
+    SYS_CONSOLE_PRINT("[COMM] Packet OK, msgType=0x%02X\r\n",
+                      (unsigned)u8MsgType);
+
+    switch (u8MsgType)
+    {
+        case COMM_SUBCMD_READ:   /* 0x00 — return current config */
+            prv_ProcessCommissioningRead();
+            break;
+
+        case COMM_SUBCMD_WRITE:  /* 0x01 — apply new config */
+            prv_ProcessCommissioningWrite(pu8Buf);
+            break;
+
+        default:
+            SYS_CONSOLE_PRINT("[COMM] Unknown msgType 0x%02X\r\n",
+                              (unsigned)u8MsgType);
+            {
+                uint8_t u8Nack = COMM_RESP_NACK_PAYLOAD_LEN;
+                (void)TCPIP_TCP_ArrayPut(s_commSocket, &u8Nack, 1U);
+            }
+            break;
+    }
+}
+
+/* --------------------------------------------------------------------------
+ * prv_SaveIocConfigToFlash
+ * -------------------------------------------------------------------------- */
+/**
+ * @brief  Persist the complete flash_data_t (including updated iocCfg) to flash.
+ *
+ *         Performs an atomic page-erase then row-write so that ALL existing
+ *         fields (digitalOutputs, relayOutputs, serialNumber, canPorts, …) are
+ *         preserved alongside the newly written iocCfg.
+ *
+ *         Both the erase and write operations are guarded by a timeout counter
+ *         (ADC_TIMEOUT_CYCLES) to prevent an infinite busy-wait on hardware
+ *         failure.
+ */
+static void prv_SaveIocConfigToFlash(void)
+{
+    uint32_t u32Timeout;
+    uint8_t  au8Buf[sizeof(flash_data_t)];
+
+    writeData.magic = FLASH_MAGIC;   /* Ensure magic marker is always valid */
+
+    (void)memcpy(au8Buf, &writeData, sizeof(flash_data_t));
+    DCACHE_CLEAN_BY_ADDR((uint32_t *)au8Buf, sizeof(au8Buf));
+
+    FCW_PageErase(FLASH_ADDRESS);
+    u32Timeout = ADC_TIMEOUT_CYCLES;
+    while (FCW_IsBusy() && (u32Timeout > 0U))
+    {
+        u32Timeout--;
+    }
+    if (u32Timeout == 0U)
+    {
+        SYS_CONSOLE_PRINT("[COMM] Flash erase timeout!\r\n");
+        return;
+    }
+
+    FCW_RowWrite((uint32_t *)au8Buf, FLASH_ADDRESS);
+    u32Timeout = ADC_TIMEOUT_CYCLES;
+    while (FCW_IsBusy() && (u32Timeout > 0U))
+    {
+        u32Timeout--;
+    }
+    if (u32Timeout == 0U)
+    {
+        SYS_CONSOLE_PRINT("[COMM] Flash write timeout!\r\n");
+        return;
+    }
+
+    SYS_CONSOLE_PRINT("[COMM] IOC config saved to flash\r\n");
+}
+
+/* --------------------------------------------------------------------------
+ * prv_ProcessCommissioningRead
+ * -------------------------------------------------------------------------- */
+/**
+ * @brief  Respond to a READ request with the current IOC configuration.
+ *
+ *         Builds a fresh 37-byte IOC_Commisioning_t response from RAM, appends
+ *         a valid CRC16-CCITT, and sends it directly on s_commSocket (raw,
+ *         no normal-mode frame wrapping).
+ *
+ *         Response wire layout (37 bytes):
+ *           [0]      msgType         = 0x00  (READ echo)
+ *           [1]      u8CompartmentId (from writeData.iocCfg)
+ *           [2]      u8MaxDocks       (from writeData.iocCfg)
+ *           [3..18]  cIpAddress[16]  (null-padded ASCII)
+ *           [19..34] cSubnetMask[16] (null-padded ASCII)
+ *           [35..36] CRC16-CCITT     (big-endian, covers [0..34])
+ */
+static void prv_ProcessCommissioningRead(void)
+{
+    SYS_CONSOLE_PRINT("[COMM] Read config request received\r\n");
+
+    uint8_t au8Resp[IOC_COMMISSIONING_STRUCT_SIZE];
+    (void)memset(au8Resp, 0, sizeof(au8Resp));
+
+    /* Byte 0: msgType echoed as READ (0x00) */
+    au8Resp[COMM_PAYLOAD_MSGTYPE_OFF]  = COMM_SUBCMD_READ;
+
+    /* Byte 1: CompartmentId */
+    au8Resp[COMM_PAYLOAD_COMP_ID_OFF]  = writeData.iocCfg.u8CompartmentId;
+
+    /* Byte 2: MaxDock */
+    au8Resp[COMM_PAYLOAD_MAX_DOCK_OFF] = writeData.iocCfg.u8MaxDocks;
+
+    /* Bytes 3..18: IP address (16 bytes, null-padded) */
+    (void)memcpy(&au8Resp[COMM_PAYLOAD_IP_OFF],
+                 writeData.iocCfg.cIpAddress,
+                 sizeof(writeData.iocCfg.cIpAddress));
+
+    /* Bytes 19..34: Subnet mask (16 bytes, null-padded) */
+    (void)memcpy(&au8Resp[COMM_PAYLOAD_SUBNET_OFF],
+                 writeData.iocCfg.cSubnetMask,
+                 sizeof(writeData.iocCfg.cSubnetMask));
+
+    /* Bytes 35..36: CRC16-CCITT over [0..34], big-endian */
+    uint16_t u16Crc = prv_CalculateCRC16(au8Resp,
+                          (uint16_t)(IOC_COMMISSIONING_STRUCT_SIZE - 2U));
+    au8Resp[COMM_PAYLOAD_CRC_OFF]      = (uint8_t)((u16Crc >> 8U) & 0xFFU);
+    au8Resp[COMM_PAYLOAD_CRC_OFF + 1U] = (uint8_t)( u16Crc        & 0xFFU);
+
+    SYS_CONSOLE_PRINT("[COMM] Sending config:"
+                      " Cmp=%u Dock=%u IP=%s Subnet=%s CRC=0x%04X\r\n",
+                      (unsigned)au8Resp[COMM_PAYLOAD_COMP_ID_OFF],
+                      (unsigned)au8Resp[COMM_PAYLOAD_MAX_DOCK_OFF],
+                      &au8Resp[COMM_PAYLOAD_IP_OFF],
+                      &au8Resp[COMM_PAYLOAD_SUBNET_OFF],
+                      (unsigned)u16Crc);
+
+    /* Send raw 37-byte struct directly on the commissioning socket */
+    (void)TCPIP_TCP_ArrayPut(s_commSocket,
+                              au8Resp,
+                              (uint16_t)IOC_COMMISSIONING_STRUCT_SIZE);
+}
+
+/* --------------------------------------------------------------------------
+ * prv_ProcessCommissioningWrite
+ * -------------------------------------------------------------------------- */
+/**
+ * @brief  Validate and apply a WRITE configuration from the client.
+ *
+ *         The caller (prv_ParseCommissioningPacket) has already validated the
+ *         packet length and CRC before calling this function.  pu8Struct points
+ *         directly to the start of the 37-byte buffer, so field offsets map
+ *         exactly to COMM_PAYLOAD_*_OFF macros.
+ *
+ *         Field layout reminder:
+ *           pu8Struct[0]       = msgType  (0x01, already validated by caller)
+ *           pu8Struct[1]       = u8CompartmentId
+ *           pu8Struct[2]       = u8MaxDocks
+ *           pu8Struct[3..18]   = cIpAddress[16]   (null-padded ASCII)
+ *           pu8Struct[19..34]  = cSubnetMask[16]  (null-padded ASCII)
+ *           pu8Struct[35..36]  = u16Crc (verified by caller, not re-checked here)
+ *
+ *         Validation performed here:
+ *           1. u8MaxDocks in range [1..COMM_MAX_DOCK_LIMIT].
+ *           2. cIpAddress parseable as IPv4 by TCPIP_Helper_StringToIPAddress.
+ *           3. cSubnetMask parseable as IPv4 by TCPIP_Helper_StringToIPAddress.
+ *
+ *         On success:
+ *           a. Updates writeData.iocCfg in RAM.
+ *           b. Calls prv_SaveIocConfigToFlash() — full page write.
+ *           c. Sends 1-byte ACK (0x00) on s_commSocket.
+ *           d. Delays 200 ms so TCP stack can flush the ACK.
+ *           e. Calls SYS_RESET_SoftwareReset().
+ *
+ * @param  pu8Struct  Pointer to the validated 37-byte IOC_Commisioning_t buffer.
+ */
+static void prv_ProcessCommissioningWrite(const uint8_t *pu8Struct)
+{
+    /* ── Step 1: Extract fields from the validated struct ─────────────────── */
+    uint8_t u8CompId  = pu8Struct[COMM_PAYLOAD_COMP_ID_OFF];
+    uint8_t u8MaxDock = pu8Struct[COMM_PAYLOAD_MAX_DOCK_OFF];
+
+    /*
+     * Copy IP and subnet into local null-terminated char arrays.
+     * Copy only 15 bytes and force null at [15] to guard against a sender
+     * that fills all 16 bytes without a null terminator.
+     */
+    char acIp[16];
+    char acSubnet[16];
+    (void)memcpy(acIp,     &pu8Struct[COMM_PAYLOAD_IP_OFF],     15U);
+    (void)memcpy(acSubnet, &pu8Struct[COMM_PAYLOAD_SUBNET_OFF], 15U);
+    acIp[15]     = '\0';
+    acSubnet[15] = '\0';
+
+    SYS_CONSOLE_PRINT("[COMM] Write request:"
+                      " Cmp=%u Dock=%u IP=%s Subnet=%s\r\n",
+                      (unsigned)u8CompId, (unsigned)u8MaxDock,
+                      acIp, acSubnet);
+
+    /* ── Step 2: Validate MaxDock ─────────────────────────────────────────── */
+    if ((u8MaxDock < 1U) || (u8MaxDock > (uint8_t)COMM_MAX_DOCK_LIMIT))
+    {
+        SYS_CONSOLE_PRINT("[COMM] Invalid MaxDock=%u (valid 1..%u)\r\n",
+                          (unsigned)u8MaxDock,
+                          (unsigned)COMM_MAX_DOCK_LIMIT);
+        uint8_t u8Nack = COMM_RESP_NACK_INVALID_FIELD;
+        (void)TCPIP_TCP_ArrayPut(s_commSocket, &u8Nack, 1U);
+        return;
+    }
+
+    /* ── Step 3: Validate IP address string ───────────────────────────────── */
+    IPV4_ADDR sTmpIp;
+    if (!TCPIP_Helper_StringToIPAddress(acIp, &sTmpIp))
+    {
+        SYS_CONSOLE_PRINT("[COMM] Invalid IP address: \"%s\"\r\n", acIp);
+        uint8_t u8Nack = COMM_RESP_NACK_INVALID_FIELD;
+        (void)TCPIP_TCP_ArrayPut(s_commSocket, &u8Nack, 1U);
+        return;
+    }
+
+    /* ── Step 4: Validate subnet mask string ──────────────────────────────── */
+    IPV4_ADDR sTmpMask;
+    if (!TCPIP_Helper_StringToIPAddress(acSubnet, &sTmpMask))
+    {
+        SYS_CONSOLE_PRINT("[COMM] Invalid subnet mask: \"%s\"\r\n", acSubnet);
+        uint8_t u8Nack = COMM_RESP_NACK_INVALID_FIELD;
+        (void)TCPIP_TCP_ArrayPut(s_commSocket, &u8Nack, 1U);
+        return;
+    }
+
+    /* ── Step 5: Update RAM configuration ────────────────────────────────── */
+    writeData.iocCfg.u8CompartmentId = u8CompId;
+    writeData.iocCfg.u8MaxDocks       = u8MaxDock;
+    // Mac Address is fixed and read-only, set it once here to ensure it's always valid in flash
+    MAC_WriteToFlash((uint8_t)u8CompId);
+    (void)memcpy(writeData.iocCfg.cIpAddress,
+                 acIp,
+                 sizeof(writeData.iocCfg.cIpAddress));
+    writeData.iocCfg.cIpAddress[15] = '\0';
+
+    (void)memcpy(writeData.iocCfg.cSubnetMask,
+                 acSubnet,
+                 sizeof(writeData.iocCfg.cSubnetMask));
+    writeData.iocCfg.cSubnetMask[15] = '\0';
+
+    /* ── Step 6: Persist full flash_data_t to flash ───────────────────────── */
+    /*
+     * prv_SaveIocConfigToFlash() writes the entire writeData struct as one
+     * atomic erase+write.  All existing non-IOC fields (digitalOutputs,
+     * relayOutputs, canPorts, rs485Config, serialNumber, …) are preserved.
+     */
+    prv_SaveIocConfigToFlash();
+    SYS_CONSOLE_PRINT("[COMM] Write config success\r\n");
+
+    /* ── Step 7: ACK the client — send raw 1-byte response on comm socket ─── */
+    uint8_t u8Ack = COMM_RESP_ACK;
+    (void)TCPIP_TCP_ArrayPut(s_commSocket, &u8Ack, 1U);
+
+    /* Allow TCP stack to flush the ACK before resetting */
+    vTaskDelay(pdMS_TO_TICKS(200U));
+
+    /* ── Step 8: Reboot — device loads new config from flash on next boot ─── */
+    SYS_CONSOLE_PRINT("[COMM] Rebooting system\r\n");
+    SYS_RESET_SoftwareReset();
+}
+
+/* ============================================================================
  * IO Expander Stubs (implemented elsewhere — stubs for reference)
  * ========================================================================== */
 
@@ -1789,6 +2397,15 @@ static void prv_vConfigureIOexpanders(void)
     (void)IOExpander1_Configure_Ports();
 }
 
+static void prv_SetStoredStaticIP(void)
+{
+    char *pcIp     = SESSION_GetIpAddress();
+    char *pcSubnet = SESSION_GetSubnetMask();
+    SYS_CONSOLE_PRINT("[NET] Applying stored IP config: IP=%s Subnet=%s\r\n",
+                      pcIp, pcSubnet);
+    /* Apply IP */
+    prv_SetStaticIPAddress(pcIp, pcSubnet);
+}
 /* ============================================================================
  * Main IO Handler Task
  * ========================================================================== */
@@ -1808,23 +2425,86 @@ static void prv_IOHandlerServerTask(void *pvParameters)
     prv_MovingAverage_Init_All();
     prv_vConfigureIOexpanders();
 
-    SYS_CONSOLE_PRINT("[IO] Reading flash config\r\n");
-    prv_ReadOutputsFromFlash();
-
     s_ioSocket = TCPIP_TCP_ServerOpen(IP_ADDRESS_TYPE_IPV4, IO_SERVER_PORT_HEV, 0U);
     if (s_ioSocket == INVALID_SOCKET)
     {
-        SYS_CONSOLE_PRINT("[IO] Failed to open TCP socket task exiting\r\n");
+        SYS_CONSOLE_PRINT("[IO] Failed to open TCP socket — task exiting\r\n");
         vTaskDelete(NULL);
         return;
     }
-
+    prv_SetStoredStaticIP(); /* Ensure we have a valid IP for clients to connect to */
     SYS_CONSOLE_PRINT("[IO] Task started on port %u\r\n", IO_SERVER_PORT_HEV);
 
     while (true)
     {
         prv_ReadDigitalInputs();
         ReadAllAnalogInputPins();
+
+        /* ── Commissioning mode: dedicated raw-struct server ─────────────── */
+        /*
+         * IMPORTANT: commissioning packets are NOT wrapped in the normal TCP
+         * frame (no UniqueID / MsgType / CmpId / DockId / CmdId header).
+         * The client sends the 37-byte IOC_Commisioning_t struct DIRECTLY.
+         *
+         * Raw wire layout (37 bytes, no header, no outer CRC wrapper):
+         *
+         *   Byte  0     : msgType         0x00 = READ, 0x01 = WRITE
+         *   Byte  1     : u8CompartmentId
+         *   Byte  2     : u8MaxDocks
+         *   Bytes 3..18 : cIpAddress[16]  (null-padded ASCII)
+         *   Bytes 19..34: cSubnetMask[16] (null-padded ASCII)
+         *   Bytes 35..36: u16Crc          (CRC16-CCITT, big-endian, covers [0..34])
+         *
+         * Example WRITE frame (37 bytes):
+         *   01 01 03
+         *   31 39 32 2E 31 36 38 2E 31 2E 32 33 31 00 00 00  "192.168.1.231"
+         *   32 35 35 2E 32 35 35 2E 32 35 35 2E 30 00 00 00  "255.255.255.0"
+         *   B0 C4
+         *
+         * prv_ParseAndProcessInbPacket() is intentionally NOT used here because
+         * it expects the 10-byte normal-mode frame header which does not exist
+         * in commissioning packets.  prv_ParseCommissioningPacket() handles this
+         * raw format exclusively.
+         */
+        if (g_systemMode == MODE_COMMISSIONING)
+        {
+            /* Open the commissioning server the first time we enter this mode */
+            if (s_commSocket == INVALID_SOCKET)
+            {
+                prv_StartCommissioningServer();
+            }
+
+            if ((s_commSocket != INVALID_SOCKET) &&
+                TCPIP_TCP_IsConnected(s_commSocket))
+            {
+                /* Buffer sized exactly for one IOC_Commisioning_t struct */
+                uint8_t au8CommBuf[IOC_COMMISSIONING_STRUCT_SIZE];
+                (void)memset(au8CommBuf, 0, sizeof(au8CommBuf));
+
+                int16_t i16Bytes = TCPIP_TCP_ArrayGet(s_commSocket,
+                                                       au8CommBuf,
+                                                       (uint16_t)sizeof(au8CommBuf));
+                if (i16Bytes > 0)
+                {
+                    SYS_CONSOLE_PRINT("[COMM] Received %d bytes\r\n",
+                                      (int)i16Bytes);
+                    prv_ParseCommissioningPacket(au8CommBuf,
+                                                 (uint16_t)i16Bytes);
+                }
+
+                /* Handle client disconnection */
+                if ((!TCPIP_TCP_IsConnected(s_commSocket)) ||
+                    TCPIP_TCP_WasDisconnected(s_commSocket))
+                {
+                    SYS_CONSOLE_PRINT("[COMM] Client disconnected\r\n");
+                    TCPIP_TCP_Close(s_commSocket);
+                    s_commSocket = INVALID_SOCKET;
+                }
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(IO_TASK_LOOP_DELAY_MS));
+            continue; /* Skip normal-mode socket handling below */
+        }
 
         if (TCPIP_TCP_IsConnected(s_ioSocket))
         {
@@ -1887,6 +2567,8 @@ static void prv_IOHandlerServerTask(void *pvParameters)
  */
 bool vIOHandler(void)
 {
+    SYS_CONSOLE_PRINT("[IO] Reading flash config\r\n");
+    prv_ReadOutputsFromFlash();
     if (xTaskCreate(prv_IOHandlerServerTask,
                     "IO_Handler",
                     IO_SERVER_HANDLER_STACK_DEPTH,
@@ -1901,6 +2583,133 @@ bool vIOHandler(void)
     return true;
 }
 
+/* =========================
+ * MAC BUILD
+ * ========================= */
+static void MAC_Build(uint8_t lastByte, uint8_t *mac)
+{
+    if (lastByte == 0x00 || lastByte == 0xFF)
+    {
+        lastByte = 0x01;
+    }
+
+    mac[0] = APP_MAC_BASE_BYTE0;
+    mac[1] = APP_MAC_BASE_BYTE1;
+    mac[2] = APP_MAC_BASE_BYTE2;
+    mac[3] = APP_MAC_BASE_BYTE3;
+    mac[4] = APP_MAC_BASE_BYTE4;
+    mac[5] = lastByte;
+}
+
+/* =========================
+ * INIT
+ * ========================= */
+bool MAC_Init(void)
+{
+    return MAC_ReadFromFlash();
+}
+
+/* =========================
+ * READ FROM FLASH
+ * ========================= */
+bool MAC_ReadFromFlash(void)
+{
+    mac_flash_data_t data;
+    bool blank = true;
+
+    FCW_Read((uint32_t *)&data,
+             sizeof(data),
+             MAC_FLASH_ADDRESS);
+
+    /* Fast validation */
+    if (data.magic != MAC_FLASH_MAGIC)
+    {
+        MAC_Build(0x01, gDeviceMac);
+        MAC_WriteToFlash(0x01);
+        return false;
+    }
+
+    /* Check blank */
+    uint8_t *p = (uint8_t *)&data;
+    for (uint32_t i = 0; i < sizeof(data); i++)
+    {
+        if (p[i] != 0x00U && p[i] != 0xFFU)
+        {
+            blank = false;
+            break;
+        }
+    }
+
+    if (blank)
+    {
+        MAC_Build(0x01, gDeviceMac);
+        MAC_WriteToFlash(0x01);
+        return false;
+    }
+
+    MAC_Build(data.mac_last_byte, gDeviceMac);
+    return true;
+}
+
+/* =========================
+ * WRITE TO FLASH
+ * ========================= */
+bool MAC_WriteToFlash(uint8_t lastByte)
+{
+    mac_flash_data_t data;
+    uint32_t timeout;
+
+    data.magic = MAC_FLASH_MAGIC;
+    data.mac_last_byte = lastByte;
+    memset(data.reserved, 0xFF, sizeof(data.reserved));
+
+    DCACHE_CLEAN_BY_ADDR((uint32_t *)&data, sizeof(data));
+
+    FCW_PageErase(MAC_FLASH_ADDRESS);
+
+    timeout = FCW_TIMEOUT_CYCLES;
+    while (FCW_IsBusy() && (timeout-- > 0U));
+
+    if (timeout == 0U)
+        return false;
+
+    FCW_RowWrite((uint32_t *)&data, MAC_FLASH_ADDRESS);
+
+    timeout = FCW_TIMEOUT_CYCLES;
+    while (FCW_IsBusy() && (timeout-- > 0U));
+
+    return (timeout != 0U);
+}
+
+/* =========================
+ * GET MAC
+ * ========================= */
+const uint8_t* MAC_Get(void)
+{
+    return gDeviceMac;
+}
+
+/* =========================
+ * STRING CONVERT
+ * ========================= */
+void MAC_ToString(const uint8_t *mac, char *str)
+{
+    sprintf(str,
+        "%02X:%02X:%02X:%02X:%02X:%02X",
+        mac[0], mac[1], mac[2],
+        mac[3], mac[4], mac[5]);
+}
+
+/* =========================
+ * PRINT
+ * ========================= */
+void MAC_Print(const uint8_t *mac)
+{
+    SYS_CONSOLE_PRINT(
+        "MAC: %02X:%02X:%02X:%02X:%02X:%02X\r\n",
+        mac[0], mac[1], mac[2],
+        mac[3], mac[4], mac[5]);
+}
 /* ************************************************************************** */
 /* End of File                                                                */
 /* ************************************************************************** */

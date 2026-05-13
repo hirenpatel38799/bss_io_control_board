@@ -177,7 +177,7 @@ static bool prv_EnsureSocketOpen(void)
  */
 static void prv_UpdateFromSession(uint8_t u8DockId)
 {
-    if ((u8DockId < (uint8_t)DOCK_1) || (u8DockId >= (uint8_t)MAX_DOCKS))
+    if ((u8DockId < (uint8_t)DOCK_1) || (u8DockId > (uint8_t)SESSION_GetMaxDocks()))
     {
         SYS_CONSOLE_PRINT("[Telemetry] UpdateFromSession: invalid dock %u\r\n",
                           (unsigned)u8DockId);
@@ -242,12 +242,8 @@ static void prv_UpdateFromSession(uint8_t u8DockId)
     telemetryData[u8DockId].tempData.u8CompartmentTemperature =
         SESSION_GetDockTemperature((uint8_t)COMPARTMENT);
 
-    telemetryData[u8DockId].tempData.u8Dock1Temperature =
-        SESSION_GetDockTemperature((uint8_t)DOCK_1);
-    telemetryData[u8DockId].tempData.u8Dock2Temperature =
-        SESSION_GetDockTemperature((uint8_t)DOCK_2);
-    telemetryData[u8DockId].tempData.u8Dock3Temperature =
-        SESSION_GetDockTemperature((uint8_t)DOCK_3);
+    telemetryData[u8DockId].tempData.u8DockTemperature[u8DockId] =
+        SESSION_GetDockTemperature((uint8_t)u8DockId);
 }
 
 /**
@@ -419,16 +415,17 @@ static void prv_SendBMS(uint8_t u8CompartmentId, uint8_t u8DockId)
 static void prv_SendTemperature(uint8_t u8CompartmentId)
 {
     uint8_t au8Payload[TELEMETRY_TEMP_PAYLOAD_SIZE];
-
+    uint8_t u8TemperatureTelemetrySize = SESSION_GetMaxDocks() + 1U; /* +1 for compartment sensor */
     /* Read directly from session DB — always fresh */
     au8Payload[0] = SESSION_GetDockTemperature((uint8_t)COMPARTMENT);
-    au8Payload[1] = SESSION_GetDockTemperature((uint8_t)DOCK_1);
-    au8Payload[2] = SESSION_GetDockTemperature((uint8_t)DOCK_2);
-    au8Payload[3] = SESSION_GetDockTemperature((uint8_t)DOCK_3);
+    for (uint8_t u8DockNo = DOCK_1; u8DockNo <= SESSION_GetMaxDocks(); u8DockNo++)
+    {
+        au8Payload[u8DockNo] = SESSION_GetDockTemperature(u8DockNo);
+    }
 
     /* Dock ID = 0x00 indicates a broadcast (not dock-specific) */
     prv_SendFrame(TELEMETRY_CMD_TEMP_DATA, u8CompartmentId, 0x00U,
-                  au8Payload, (uint8_t)TELEMETRY_TEMP_PAYLOAD_SIZE);
+                  au8Payload, (uint8_t)u8TemperatureTelemetrySize);
 }
 
 /* ============================================================================
@@ -537,23 +534,23 @@ void Telemetry_Task(void *pvParameters)
             vTaskDelay(pdMS_TO_TICKS(TELEMETRY_TASK_DELAY_MS));
             continue;
         }
-
+        uint8_t u8CompartmentId = SESSION_GetCompartmentId();
         /* Step 3: Broadcast per-dock PM and BMS data */
         for (uint8_t u8DockNo = (uint8_t)DOCK_1;
-             u8DockNo < (uint8_t)MAX_DOCKS;
+             u8DockNo <= (uint8_t)SESSION_GetMaxDocks();
              u8DockNo++)
         {
             prv_UpdateFromSession(u8DockNo);
 
-            prv_SendBMS(COMPARTMENT_ID, u8DockNo);
+            prv_SendBMS(u8CompartmentId, u8DockNo);
             vTaskDelay(pdMS_TO_TICKS(TELEMETRY_INTER_SEND_MS));
 
-            prv_SendPM(COMPARTMENT_ID, u8DockNo);
+            prv_SendPM(u8CompartmentId, u8DockNo);
             vTaskDelay(pdMS_TO_TICKS(TELEMETRY_INTER_SEND_MS));
         }
 
         /* Step 4: Broadcast combined temperature frame (all docks) */
-        prv_SendTemperature(COMPARTMENT_ID);
+        prv_SendTemperature(u8CompartmentId);
 
         /* Step 5: Wait until next broadcast interval */
         vTaskDelay(pdMS_TO_TICKS(TELEMETRY_TASK_DELAY_MS));

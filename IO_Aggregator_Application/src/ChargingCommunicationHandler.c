@@ -21,6 +21,9 @@
  *   CANBUS_0 → DOCK_1
  *   CANBUS_1 → DOCK_2
  *   CANBUS_2 → DOCK_3
+ *  CANBUS_3 → DOCK_4 (reserved)
+ *  CANBUS_4 → DOCK_5 (reserved)
+ *  CANBUS_5 → DOCK_6 (reserved)
  *
  * @author  Sarang Parmar
  * @date    2026-03-16
@@ -120,6 +123,9 @@ static bool bResolveDockFromCanBus(uint8_t canBus, uint8_t *pDockNo)
         case CANBUS_0: *pDockNo = DOCK_1; return true;
         case CANBUS_1: *pDockNo = DOCK_2; return true;
         case CANBUS_2: *pDockNo = DOCK_3; return true;
+        case CANBUS_3: *pDockNo = DOCK_4; return true;
+        case CANBUS_4: *pDockNo = DOCK_5; return true;
+        case CANBUS_5: *pDockNo = DOCK_6; return true;
         default:                           return false;
     }
 }
@@ -367,10 +373,10 @@ void vChargingCanCommunicationTxTimerCallback(void *xTimer)
     (void)xTimer;
 
     /* Transmit BMS and PM frames for every dock */
-    for (uint8_t dock = DOCK_1; dock < MAX_DOCKS; dock++)
+    for (uint8_t u8DockNo = DOCK_1; u8DockNo <= SESSION_GetMaxDocks(); u8DockNo++)
     {
-        vProcessBMSMessage(dock);
-        vProcessPMMessage(dock);
+        vProcessBMSMessage(u8DockNo);
+        vProcessPMMessage(u8DockNo);
     }
 
 #if (CHARGING_PROTOCOL == PROTOCOL_TVS_PROP)

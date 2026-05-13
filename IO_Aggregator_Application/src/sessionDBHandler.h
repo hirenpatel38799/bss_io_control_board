@@ -101,9 +101,9 @@ typedef enum
     DOCK_1      = 1,   /**< Dock 1 → CAN0                       */
     DOCK_2      = 2,   /**< Dock 2 → CAN1                       */
     DOCK_3      = 3,   /**< Dock 3 → CAN2                       */
-    // DOCK_4      = 4,   /**< Dock 4 → CAN3                       */
-    // DOCK_5      = 5,   /**< Dock 5 → CAN4                       */
-    // DOCK_6      = 6,   /**< Dock 6 → CAN5                       */
+    DOCK_4      = 4,   /**< Dock 4 → CAN3                       */
+    DOCK_5      = 5,   /**< Dock 5 → CAN4                       */
+    DOCK_6      = 6,   /**< Dock 6 → CAN5                       */
     MAX_DOCKS          /**< Total array size (do not use as index)*/
 } Dock_e;
 
@@ -288,6 +288,10 @@ typedef struct
     volatile uint32_t u32PMLastRxTime;        /**< Tick of last PM CAN frame         */
     volatile uint32_t u32BMSLastRxTime;       /**< Tick of last BMS CAN frame        */
 
+    uint8_t          u8CompartmentId;        /**< Compartment identifier            */
+    uint8_t          u8MaxDocks;              /**< Max number of docks supported     */
+    char             cIpAddress[16];     // "xxx.xxx.xxx.xxx" + '\0'
+    char             cSubnetMask[16];
 } SESSION_Data_t;
 
 /** @brief Global session database — one entry per dock */
@@ -392,6 +396,19 @@ extern SESSION_Data_t sessionDB[MAX_DOCKS];
 
 #define SESSION_SetBMSLastRxTime(idx, val)      (sessionDB[(idx)].u32BMSLastRxTime = (val))
 #define SESSION_GetBMSLastRxTime(idx)           (sessionDB[(idx)].u32BMSLastRxTime)
+
+/* --- Compartment and Network --- */
+#define SESSION_SetCompartmentId(val)        (sessionDB[(COMPARTMENT)].u8CompartmentId = (val))
+#define SESSION_GetCompartmentId()           (sessionDB[(COMPARTMENT)].u8CompartmentId)
+
+#define SESSION_SetMaxDocks(val)             (sessionDB[(COMPARTMENT)].u8MaxDocks = (val))
+#define SESSION_GetMaxDocks()                (sessionDB[(COMPARTMENT)].u8MaxDocks)
+
+#define SESSION_SetIpAddress(val)            strcpy(sessionDB[(COMPARTMENT)].cIpAddress, val)
+#define SESSION_GetIpAddress()               (sessionDB[(COMPARTMENT)].cIpAddress)
+
+#define SESSION_SetSubnetMask(val)           strcpy(sessionDB[(COMPARTMENT)].cSubnetMask, val)
+#define SESSION_GetSubnetMask()              (sessionDB[(COMPARTMENT)].cSubnetMask)
 
 /* ============================================================================
  * Function Prototypes

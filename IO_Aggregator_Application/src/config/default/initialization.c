@@ -861,7 +861,7 @@ TCPIP_STACK_HEAP_INTERNAL_CONFIG tcpipHeapConfig =
 };
 
 
-const TCPIP_NETWORK_CONFIG __attribute__((unused))  TCPIP_HOSTS_CONFIGURATION[] =
+TCPIP_NETWORK_CONFIG __attribute__((unused))  TCPIP_HOSTS_CONFIGURATION[] =
 {
     /*** Network Configuration Index 0 ***/
     {
@@ -930,17 +930,50 @@ const size_t TCPIP_STACK_MODULE_CONFIG_TBL_SIZE = sizeof (TCPIP_STACK_MODULE_CON
  *                  stack or its component routines are used.
  *
  ********************************************************************/
+void APP_TCPIP_ConfigBuild(TCPIP_NETWORK_CONFIG *pNetConfig)
+{
+    // MAC_Print(mac);
+    memset(pNetConfig, 0, sizeof(TCPIP_NETWORK_CONFIG));
 
+    pNetConfig->interface  = TCPIP_NETWORK_DEFAULT_INTERFACE_NAME_IDX0;
+    pNetConfig->hostName   = TCPIP_NETWORK_DEFAULT_HOST_NAME_IDX0;
+    // pNetConfig->macAddr    = macStr;
+
+    pNetConfig->ipAddr     = TCPIP_NETWORK_DEFAULT_IP_ADDRESS_IDX0;
+    pNetConfig->ipMask     = TCPIP_NETWORK_DEFAULT_IP_MASK_IDX0;
+    pNetConfig->gateway    = TCPIP_NETWORK_DEFAULT_GATEWAY_IDX0;
+    pNetConfig->priDNS     = TCPIP_NETWORK_DEFAULT_DNS_IDX0;
+    pNetConfig->secondDNS  = TCPIP_NETWORK_DEFAULT_SECOND_DNS_IDX0;
+
+    pNetConfig->powerMode  = TCPIP_NETWORK_DEFAULT_POWER_MODE_IDX0;
+    pNetConfig->startFlags = TCPIP_NETWORK_DEFAULT_INTERFACE_FLAGS_IDX0;
+    pNetConfig->pMacObject = &TCPIP_NETWORK_DEFAULT_MAC_DRIVER_IDX0;
+}
+
+static char tcpipMacAddrString[18];
 
 SYS_MODULE_OBJ TCPIP_STACK_Init(void)
 {
-    TCPIP_STACK_INIT    tcpipInit;
+    TCPIP_STACK_INIT tcpipInit;
+    const uint8_t *mac;
 
-    tcpipInit.pNetConf = TCPIP_HOSTS_CONFIGURATION;
-    tcpipInit.nNets = TCPIP_HOSTS_CONFIGURATION_SIZE;
+    MAC_Init();
+    mac = MAC_Get();
+    MAC_ToString(mac, tcpipMacAddrString);
+
+    SYS_CONSOLE_PRINT("TCPIP Stack: MAC Address: %s\r\n", tcpipMacAddrString);
+    if (TCPIP_HOSTS_CONFIGURATION_SIZE > 0)
+    {
+        TCPIP_HOSTS_CONFIGURATION[0].macAddr = tcpipMacAddrString;
+    }
+
+    // APP_TCPIP_ConfigBuild(&netConfig[0]);
+
+    tcpipInit.pNetConf   = TCPIP_HOSTS_CONFIGURATION;
+    tcpipInit.nNets      = TCPIP_HOSTS_CONFIGURATION_SIZE;
     tcpipInit.pModConfig = TCPIP_STACK_MODULE_CONFIG_TBL;
-    tcpipInit.nModules = TCPIP_STACK_MODULE_CONFIG_TBL_SIZE;
-    tcpipInit.initCback = 0;
+    tcpipInit.nModules   = TCPIP_STACK_MODULE_CONFIG_TBL_SIZE;
+    tcpipInit.initCback  = 0;
 
     return TCPIP_STACK_Initialize(0, &tcpipInit.moduleInit);
 }
