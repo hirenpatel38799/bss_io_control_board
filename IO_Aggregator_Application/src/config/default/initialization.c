@@ -277,6 +277,7 @@
 /* MISRA C-2012 Rule 11.8 - Deviation record ID - H3_MISRAC_2012_R_11_8_DR_1 */
 // <editor-fold defaultstate="collapsed" desc="DRV_I2C Instance 0 Initialization Data">
 
+static char tcpipMacAddrString[18];
 /* I2C Client Objects Pool */
 static DRV_I2C_CLIENT_OBJ drvI2C0ClientObjPool[DRV_I2C_CLIENTS_NUMBER_IDX0];
 
@@ -950,8 +951,6 @@ void APP_TCPIP_ConfigBuild(TCPIP_NETWORK_CONFIG *pNetConfig)
     pNetConfig->pMacObject = &TCPIP_NETWORK_DEFAULT_MAC_DRIVER_IDX0;
 }
 
-static char tcpipMacAddrString[18];
-
 SYS_MODULE_OBJ TCPIP_STACK_Init(void)
 {
     TCPIP_STACK_INIT tcpipInit;
@@ -960,14 +959,11 @@ SYS_MODULE_OBJ TCPIP_STACK_Init(void)
     MAC_Init();
     mac = MAC_Get();
     MAC_ToString(mac, tcpipMacAddrString);
-
     SYS_CONSOLE_PRINT("TCPIP Stack: MAC Address: %s\r\n", tcpipMacAddrString);
     if (TCPIP_HOSTS_CONFIGURATION_SIZE > 0)
     {
         TCPIP_HOSTS_CONFIGURATION[0].macAddr = tcpipMacAddrString;
     }
-
-    // APP_TCPIP_ConfigBuild(&netConfig[0]);
 
     tcpipInit.pNetConf   = TCPIP_HOSTS_CONFIGURATION;
     tcpipInit.nNets      = TCPIP_HOSTS_CONFIGURATION_SIZE;

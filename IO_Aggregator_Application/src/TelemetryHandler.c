@@ -521,36 +521,55 @@ void Telemetry_Task(void *pvParameters)
 
     for (;;)
     {
-        /* Step 1: Ensure socket is open */
-        if (!prv_EnsureSocketOpen())
+        if (TCPIP_TCP_IsConnected(s_telemetrySocket))
         {
+            uint8_t u8CompartmentId = SESSION_GetCompartmentId();
+            /* Step 3: Broadcast per-dock PM and BMS data */
+            for (uint8_t u8DockNo = (uint8_t)DOCK_1;
+                 u8DockNo <= (uint8_t)SESSION_GetMaxDocks();
+                 u8DockNo++)
+            {
+                prv_UpdateFromSession(u8DockNo);
+
+                prv_SendBMS(u8CompartmentId, u8DockNo);
+                vTaskDelay(pdMS_TO_TICKS(TELEMETRY_INTER_SEND_MS));
+
+                prv_SendPM(u8CompartmentId, u8DockNo);
+                vTaskDelay(pdMS_TO_TICKS(TELEMETRY_INTER_SEND_MS));
+            }
+
+            prv_SendTemperature(u8CompartmentId);
+            /* Step 2: Wait for a client to connect */
+
+            if ((!TCPIP_TCP_IsConnected(s_telemetrySocket)) ||
+                TCPIP_TCP_WasDisconnected(s_telemetrySocket))
+            {
+                SYS_CONSOLE_PRINT("[Telemetry] Client disconnected\r\n");
+                TCPIP_TCP_Close(s_telemetrySocket);
+                s_telemetrySocket = INVALID_SOCKET;
+                // vTaskDelay(pdMS_TO_TICKS(TELEMETRY_TASK_DELAY_MS));
+                // continue;
+            }
+        }
+
+        /* Reconnect if socket was lost */
+        if (s_telemetrySocket == INVALID_SOCKET)
+        {
+            SYS_CONSOLE_PRINT("[Telemetry] Attempting socket reconnect...\r\n");
+            s_telemetrySocket = TCPIP_TCP_ServerOpen(IP_ADDRESS_TYPE_IPV4,
+                                                     TELEMETRY_PORT_HEV, 0U);
+            if (s_telemetrySocket == INVALID_SOCKET)
+            {
+                SYS_CONSOLE_PRINT("[Telemetry] Reconnect failed, retrying in %u ms\r\n",
+                                  TELEMETRY_RETRY_DELAY_MS);
+            }
+            else
+            {
+                SYS_CONSOLE_PRINT("[Telemetry] Reconnected\r\n");
+            }
+            /* BUG FIX: was vTaskDelay(RECONNECT_DELAY_MS) — ms not ticks */
             vTaskDelay(pdMS_TO_TICKS(TELEMETRY_RETRY_DELAY_MS));
-            continue;
         }
-
-        /* Step 2: Wait for a client to connect */
-        if (!TCPIP_TCP_IsConnected(s_telemetrySocket))
-        {
-            vTaskDelay(pdMS_TO_TICKS(TELEMETRY_TASK_DELAY_MS));
-            continue;
-        }
-        uint8_t u8CompartmentId = SESSION_GetCompartmentId();
-        /* Step 3: Broadcast per-dock PM and BMS data */
-        for (uint8_t u8DockNo = (uint8_t)DOCK_1;
-             u8DockNo <= (uint8_t)SESSION_GetMaxDocks();
-             u8DockNo++)
-        {
-            prv_UpdateFromSession(u8DockNo);
-
-            prv_SendBMS(u8CompartmentId, u8DockNo);
-            vTaskDelay(pdMS_TO_TICKS(TELEMETRY_INTER_SEND_MS));
-
-            prv_SendPM(u8CompartmentId, u8DockNo);
-            vTaskDelay(pdMS_TO_TICKS(TELEMETRY_INTER_SEND_MS));
-        }
-
-        /* Step 4: Broadcast combined temperature frame (all docks) */
-        prv_SendTemperature(u8CompartmentId);
 
         /* Step 5: Wait until next broadcast interval */
         vTaskDelay(pdMS_TO_TICKS(TELEMETRY_TASK_DELAY_MS));
