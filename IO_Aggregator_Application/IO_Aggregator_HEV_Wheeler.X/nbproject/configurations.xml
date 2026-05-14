@@ -359,6 +359,14 @@
           </logicalFolder>
         </logicalFolder>
       </logicalFolder>
+      <logicalFolder name="MB_Master_Lib"
+                     displayName="MB_Master_Lib"
+                     projectFiles="true">
+        <itemPath>../src/MB_Master_Lib/modbus_crc.h</itemPath>
+        <itemPath>../src/MB_Master_Lib/modbus_master.h</itemPath>
+        <itemPath>../src/MB_Master_Lib/modbus_rtu.h</itemPath>
+        <itemPath>../src/MB_Master_Lib/uart_port.h</itemPath>
+      </logicalFolder>
       <logicalFolder name="packs" displayName="packs" projectFiles="true">
         <logicalFolder name="PIC32CZ4010CA80208_DFP"
                        displayName="PIC32CZ4010CA80208_DFP"
@@ -990,6 +998,14 @@
           <itemPath>../src/third_party/rtos/FreeRTOS/Source/event_groups.c</itemPath>
           <itemPath>../src/third_party/rtos/FreeRTOS/Source/list.c</itemPath>
         </logicalFolder>
+      </logicalFolder>
+      <logicalFolder name="MB_Master_Lib"
+                     displayName="MB_Master_Lib"
+                     projectFiles="true">
+        <itemPath>../src/MB_Master_Lib/modbus_crc.c</itemPath>
+        <itemPath>../src/MB_Master_Lib/modbus_master.c</itemPath>
+        <itemPath>../src/MB_Master_Lib/modbus_rtu.c</itemPath>
+        <itemPath>../src/MB_Master_Lib/uart_port.c</itemPath>
       </logicalFolder>
       <logicalFolder name="f1" displayName="web_pages" projectFiles="true">
         <logicalFolder name="dyndns" displayName="dyndns" projectFiles="true">

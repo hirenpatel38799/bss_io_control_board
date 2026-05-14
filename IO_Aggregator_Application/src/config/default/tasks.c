@@ -227,7 +227,7 @@ void SYS_Tasks ( void )
     vIOHandler();
     Telemetry_Init();
     ChargingTask_Init();
-    // vRS485HandlerInit();
+    vRS485HandlerInit();
     vCanHandlerInit();
     vCommonTaskHandler();
      /**********************************************************************

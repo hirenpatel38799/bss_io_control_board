@@ -1389,11 +1389,11 @@ static void CommandRS485Test(SYS_CMD_DEVICE_NODE* pCmdIO, int argc, char** argv)
         SYS_CONSOLE_PRINT("%02X ",u8UARTbuffer[loop]);
     }    
     // Transmit to RS485 UART8 using provided API
-    RS485_TransmitData_UART8(u8UARTbuffer, 8);
+    // RS485_TransmitData_UART8(u8UARTbuffer, 8);
     vTaskDelay(pdMS_TO_TICKS(50));
 
     // Transmit to RS485 UART9 directly if no specific transmit function is available
-    RS485_TransmitData_UART9(u8UARTbuffer, 8);
+    // RS485_TransmitData_UART9(u8UARTbuffer, 8);
     vTaskDelay(pdMS_TO_TICKS(50));    
 }
 
@@ -1455,9 +1455,9 @@ static void CommandFullLoadTest(SYS_CMD_DEVICE_NODE* pCmdIO, int argc, char** ar
         {
             SYS_CONSOLE_PRINT("%02X ", u8UARTbuffer[loop]);
         }
-        RS485_TransmitData_UART8(u8UARTbuffer, sizeof(u8UARTbuffer));
+        // RS485_TransmitData_UART8(u8UARTbuffer, sizeof(u8UARTbuffer));
         vTaskDelay(pdMS_TO_TICKS(10));
-        RS485_TransmitData_UART9(u8UARTbuffer, sizeof(u8UARTbuffer));
+        // RS485_TransmitData_UART9(u8UARTbuffer, sizeof(u8UARTbuffer));
         vTaskDelay(pdMS_TO_TICKS(10));
 
         SYS_CONSOLE_MESSAGE("\r\nContinue checking whether the port is open or closed.\r\n");

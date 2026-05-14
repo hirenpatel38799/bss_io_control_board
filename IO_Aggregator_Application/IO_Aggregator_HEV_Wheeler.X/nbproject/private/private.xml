@@ -4,6 +4,7 @@
     <open-files xmlns="http://www.netbeans.org/ns/projectui-open-files/2">
         <group>
             <file>file:/D:/Projects/battery_swapping_system/Workspace/bss_io_control_board/IO_Aggregator_Application/src/ChargingHandler.c</file>
+            <file>file:/D:/Projects/battery_swapping_system/Workspace/bss_io_control_board/IO_Aggregator_Application/src/MB_Master_Lib/modbus_master.h</file>
         </group>
     </open-files>
 </project-private>

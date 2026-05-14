@@ -1,733 +1,450 @@
-#include <stddef.h>                     // Defines NULL
-#include <stdbool.h>                    // Defines true
-#include <stdlib.h>                     // Defines EXIT_FAILURE
-#include <string.h>                     // For memcpy and memset
-#include "definitions.h"                // SYS function prototypes
+/*******************************************************************************
+ * @file    AppRS485Handler.c
+ * @brief   RS485 Application Layer - Implementation
+ * @details Application-layer implementation.  This file contains ONLY:
+ *            - System initialisation (init Modbus master, create tasks)
+ *            - Business-logic request functions (LED module read/write)
+ *            - Result callback handler (interprets responses)
+ *            - Periodic scheduling task (drives state machine + requests)
+ *
+ *          There is NO direct SERCOM, GPIO, TCP, or CRC code in this file.
+ *          All those concerns are handled by the lower-layer modules.
+ *
+ * @company BACANCY SYSTEMS PVT. LTD.
+ *******************************************************************************/
+
+/* =========================================================================
+ * Included Files
+ * ========================================================================= */
+#include <stddef.h>
+#include <stdbool.h>
+#include <string.h>
+#include "definitions.h"          /* SYS_CONSOLE_PRINT                    */
 #include "AppRS485Handler.h"
-#include "timers.h"
+// #include "MB_Master_Lib/modbus_rtu.h"
+#include "FreeRTOS.h"
+#include "task.h"
 
-#define UART8 8
-#define UART9 9
+/* =========================================================================
+ * Private Data — Master channel contexts
+ * =========================================================================
+ * Statically allocated; no heap usage for the master contexts themselves.
+ * ========================================================================= */
 
-#define MODBUS_MAX_LEN         256
-#define MODBUS_RX_TIMEOUT_MS   10   // Adjust as needed (baud rate dependent)
+/** Modbus Master context for RS485 Bus 1 (CH1 — LED/OP Card bus) */
+static ModbusMaster_Channel_t s_xMasterCh1;
 
-volatile uint8_t modbusRxBuffer8[MODBUS_MAX_LEN];
-volatile size_t modbusRxIndex8 = 0;
-volatile bool modbusFrameReady8 = false;
+/** Modbus Master context for RS485 Bus 2 (CH2 — reserved / future) */
+static ModbusMaster_Channel_t s_xMasterCh2;
 
-volatile uint8_t modbusRxBuffer9[MODBUS_MAX_LEN];
-volatile size_t modbusRxIndex9 = 0;
-volatile bool modbusFrameReady9 = false;
-
-#if HEV_IO_Aggregator
-    TCP_SOCKET sUart8ServerSocket = INVALID_SOCKET;
-    TCP_SOCKET sUart9ServerSocket = INVALID_SOCKET;
-#endif
-
-#if Two_Wheeler_IO_Aggregator
-    UDP_SOCKET sUart8ServerSocket = INVALID_SOCKET;
-    UDP_SOCKET sUart9ServerSocket = INVALID_SOCKET;
-#endif    
-void vUart9HandlerServerTask(void *pvParameters);
-void vUart8HandlerServerTask(void *pvParameters);
-QueueHandle_t xUart8QueueHandler;
-QueueHandle_t xUart9QueueHandler;
-
-typedef struct
-{
-    uint8_t buffer[256];
-    uint16_t index;
-    uint16_t length;
-} ModbusMessage_t;
+/* =========================================================================
+ * Private: Result Callback
+ * =========================================================================
+ * Called by Modbus_Master_Process() upon transaction completion.
+ * Runs in the context of the application task (not ISR).
+ * ========================================================================= */
 
 /**
- * @brief Calculates the CRC-16 for a Modbus message.
+ * @brief  Modbus transaction result callback — interprets slave responses.
  *
- * This function implements the CRC-16 calculation using the Modbus polynomial 0xA001.
- * The algorithm follows bitwise processing to compute the CRC.
- *
- * @param[in]  buffer Pointer to the input data buffer.
- * @param[in]  length Length of the input data buffer.
- * @return     Computed CRC-16 value.
+ * @details Handles successful responses and all error conditions.
+ *          Extend this function to update application state, trigger alarms,
+ *          or log diagnostic events.
  */
-uint16_t CalculateModbusCRC(const uint8_t *buffer, uint16_t length)
+static void prv_ModbusResultCallback(UartPort_Channel_t         eChannel,
+                                      ModbusMaster_Result_t      eResult,
+                                      const ModbusRtu_Response_t *pxResp,
+                                      void                       *pvContext)
 {
-    uint16_t crc = 0xFFFFU; /* Initial CRC value */
-    uint16_t pos;
-    uint8_t i;
-    
-    if (buffer == NULL)  /* MISRA Compliance: Check for null pointer */
-    {
-        return 0U;
-    }
+    (void)pvContext;    /* Not used in this implementation */
 
-    for (pos = 0U; pos < length; pos++)
+    if (eResult == MB_RESULT_SUCCESS)
     {
-        crc ^= (uint16_t)buffer[pos];
-
-        for (i = 0U; i < 8U; i++)
+        if (pxResp == NULL)
         {
-            if ((crc & 0x0001U) != 0U)
-            {
-                crc >>= 1U;
-                crc ^= 0xA001U;
-            }
-            else
-            {
-                crc >>= 1U;
-            }
+            return;
         }
-    }
 
-    return crc;
-}
+        SYS_CONSOLE_PRINT("[App RS485 CH%u] Success FC=0x%02X DataLen=%u\r\n",
+                           (unsigned)eChannel,
+                           (unsigned)pxResp->eFuncCode,
+                           (unsigned)pxResp->u8DataLen);
 
-/**
- * @brief Validates if the given data is a valid Modbus request.
- * @param[in] data Pointer to the data buffer.
- * @param[in] length Length of the data buffer.
- * @return true if valid, false otherwise.
- */
-bool ValidateModbusRequest(const uint8_t *data, uint16_t length, uint8_t channelId) {
-    if (data == NULL || length < 4) return false;
-
-    uint16_t calculatedCRC = CalculateModbusCRC(data, length - 2);
-    uint16_t receivedCRC = (data[length - 1] << 8) | data[length - 2];
-
-    if (calculatedCRC != receivedCRC) {
-        SYS_CONSOLE_PRINT("Invalid Modbus request (CH%u), discarding: ", channelId);
-        for (uint16_t i = 0; i < length; i++) {
-            SYS_CONSOLE_PRINT("%02X ", data[i]);
-        }
-        SYS_CONSOLE_PRINT("\r\n");
-
-        if (channelId == 1) ReportError(ERR_RS485_1_INVALID_CRC);
-        else if (channelId == 2) ReportError(ERR_RS485_2_INVALID_CRC);
-
-        return false;
-    }
-
-    return true;
-}
-
-/**
- * @brief Sets RS485 transceiver to transmit mode.
- *
- * This function configures the RS485 transceiver direction to transmit
- * based on the provided UART number.
- *
- * @param[in] uartNumber The UART number (8 or 9) corresponding to the transceiver.
- */
-void RS485_SetTransmitMode(uint8_t uartNumber) {
-    if (uartNumber == 8) {
-        RS485_EN1_Set(); // Set direction to Transmit 
-    } else if (uartNumber == 9) {
-        RS485_EN2_Set(); // Set direction to Transmit
-    }
-}
-
-/**
- * @brief Sets RS485 transceiver to receive mode.
- *
- * This function configures the RS485 transceiver direction to receive
- * based on the provided UART number.
- *
- * @param[in] uartNumber The UART number (8 or 9) corresponding to the transceiver.
- */
-void RS485_SetReceiveMode(uint8_t uartNumber) {
-    if (uartNumber == 8) {
-        RS485_EN1_Clear(); // Set direction to Receive
-    } else if (uartNumber == 9) {
-        RS485_EN2_Clear(); // Set direction to Receive
-    }
-}
-
-/**
- * @brief Transmits data over RS485.
- *
- * This function transmits data using the specified UART number,
- * ensuring that the transmission is completed before switching back to receive mode.
- * It uses a semaphore to ensure exclusive access to the UART resource.
- *
- * @param[in] data Pointer to the data buffer to be transmitted.
- * @param[in] length Length of the data to be transmitted.
- */
-void RS485_TransmitData_UART8(uint8_t *data, uint16_t length) {
-    if (length == 0 || !ValidateModbusRequest(data, length, 1)) return;
-    taskENTER_CRITICAL();
-    RS485_SetTransmitMode(UART8);
-    if (!SERCOM8_USART_Write(data, length))
-    {
-        SYS_CONSOLE_PRINT("RS485 channel 1: Write error (no response)\r\n");
-        ReportError(ERR_RS485_1_NO_RESPONSE);
-    }    
-    while (!SERCOM8_USART_TransmitComplete());
-//    RS485_SetReceiveMode(UART8);
-    taskEXIT_CRITICAL();
-    vTaskDelay(7);
-    RS485_SetReceiveMode(UART8);
-}
-
-/**
- * @brief Transmits data over RS485.
- *
- * This function transmits data using the specified UART number,
- * ensuring that the transmission is completed before switching back to receive mode.
- * It uses a semaphore to ensure exclusive access to the UART resource.
- *
- * @param[in] data Pointer to the data buffer to be transmitted.
- * @param[in] length Length of the data to be transmitted.
- */
-void RS485_TransmitData_UART9(uint8_t *data, uint16_t length) {
-    if (length == 0 || !ValidateModbusRequest(data, length, 2)) return;
-    taskENTER_CRITICAL();
-    RS485_SetTransmitMode(UART9);
-    if (!SERCOM9_USART_Write(data, length))
-    {
-        SYS_CONSOLE_PRINT("RS485 channel 2: Write error (no response)\r\n");
-        ReportError(ERR_RS485_2_NO_RESPONSE);
-    }
-    while (!SERCOM9_USART_TransmitComplete());
-//    RS485_SetReceiveMode(UART9);
-    taskEXIT_CRITICAL();
-    vTaskDelay(7);
-    RS485_SetReceiveMode(UART9);    
-}
-
-/*
- * @brief   UART8 Server Task Handler
- * @details This function continuously monitors the UART8 server socket.
- *          It reads incoming data from the socket and transmits it over RS485.
- *          If the connection is lost, it attempts to reconnect.
- *
- * @param   pvParameters - Pointer to task parameters (unused in this function).
- *
- * @return  None (This function runs indefinitely in a loop).
- */
-
-void vUart8HandlerServerTask(void *pvParameters)
-{
-    SYS_CONSOLE_PRINT("In Function: %s\r\n", __FUNCTION__);
-
-#if HEV_IO_Aggregator    
-    // Move buffers out of loop to avoid repeated stack usage
-    uint8_t u8UART8Buffer[128] = {0};
-    ModbusMessage_t modbusMessage;
-    TickType_t lastReconnectAttempt = 0;
-#endif
-
-    while (true)
-    {
-        #if HEV_IO_Aggregator
-                // Handle data from queue (Modbus TX to client)
-                if (xQueueReceive(xUart8QueueHandler, &modbusMessage, pdMS_TO_TICKS(50)) == pdPASS)
-                {
-                    if (TCPIP_TCP_IsConnected(sUart8ServerSocket))
-                    {
-                        SYS_CONSOLE_PRINT("Write %d bytes on UART8 Server\n\r", modbusMessage.length);
-                        TCPIP_TCP_ArrayPut(sUart8ServerSocket, modbusMessage.buffer, modbusMessage.length);
-                    }
-
-                    // Clear message buffer safely
-                    memset(modbusMessage.buffer, 0, sizeof(modbusMessage.buffer));
-                    modbusMessage.index = 0U;
-                    modbusMessage.length = 0U;
-                }
-                else
-                {
-                    // No queue data? Check for TCP receive
-                    if (TCPIP_TCP_IsConnected(sUart8ServerSocket))
-                    {
-                        int16_t bytesRead = TCPIP_TCP_ArrayGet(sUart8ServerSocket, u8UART8Buffer, sizeof(u8UART8Buffer));
-                        if (bytesRead > 0)
-                        {
-                            SYS_CONSOLE_PRINT("Got Data on RS485_1 Server Handler - Data Send to UART8\r\n");
-                            RS485_TransmitData_UART8(u8UART8Buffer, bytesRead);
-                        }
-                        if (!TCPIP_TCP_IsConnected(sUart8ServerSocket) || TCPIP_TCP_WasDisconnected(sUart8ServerSocket)) {
-                            SYS_CONSOLE_PRINT("\r\nTCP RS485_1 Connection Closed\r\n");
-                            TCPIP_TCP_Close(sUart8ServerSocket);
-                            sUart8ServerSocket = INVALID_SOCKET;
-                        }                         
-                    }
-                }
-
-                // Smart reconnect handling every 3 seconds
-                if (sUart8ServerSocket == INVALID_SOCKET)
-                {
-                    TickType_t currentTime = xTaskGetTickCount();
-                    if ((currentTime - lastReconnectAttempt) > pdMS_TO_TICKS(3000))
-                    {
-                        lastReconnectAttempt = currentTime;
-
-                        sUart8ServerSocket = TCPIP_TCP_ServerOpen(IP_ADDRESS_TYPE_IPV4, writeData.rs485Ports[0], 0);
-                        if (sUart8ServerSocket == INVALID_SOCKET)
-                        {
-                            SYS_CONSOLE_PRINT("Failed to reopen RS485_1 socket, retrying...\r\n");
-                        }
-                        else
-                        {
-                            SYS_CONSOLE_PRINT("RS485_1 socket reopened successfully\r\n");
-                        }
-                    }
-                }
-
-        #elif Two_Wheeler_IO_Aggregator
-            int16_t availableBytes = TCPIP_UDP_GetIsReady(sUart8ServerSocket);
-            if (availableBytes > 0) 
-            {
-                uint8_t u8Uart8Buffer[64];  // Adjust buffer size if needed
-                memset(u8Uart8Buffer, 0, sizeof(u8Uart8Buffer));
-                int bytesReceived = TCPIP_UDP_ArrayGet(sUart8ServerSocket, u8Uart8Buffer, sizeof(u8Uart8Buffer));
-                if (bytesReceived > 0) 
-                {
-                    SYS_CONSOLE_PRINT("Received UDP Data (Length: %d): ", bytesReceived);
-                    for (int i = 0; i < bytesReceived; i++) 
-                    {
-                        SYS_CONSOLE_PRINT("%02X ", u8Uart8Buffer[i]);
-                    }
-                    SYS_CONSOLE_PRINT("\r\n");
-                    RS485_TransmitData_UART8(u8Uart8Buffer, bytesReceived);
-                }
-                TCPIP_UDP_Discard(sUart8ServerSocket);  // Free the RX buffer
-            }                
-            // Ensure reconnection logic is handled correctly
-            if (sUart8ServerSocket == INVALID_SOCKET) {
-                sUart8ServerSocket = TCPIP_UDP_ServerOpen(IP_ADDRESS_TYPE_IPV4, UART8_SERVER_PORT, 0);
-
-                if (sUart8ServerSocket == INVALID_SOCKET) {
-                    SYS_CONSOLE_PRINT("Failed to reopen RS485_1 socket, retrying...\r\n");
-                } 
-                vTaskDelay(RECONNECT_DELAY_MS);
-            }
-            static ModbusMessage_t modbusMessage; // Ensure ModbusMessage_t is defined
-
-            if (xQueueReceive(xUart8QueueHandler, &modbusMessage, (TickType_t) 10) == pdPASS)
-            {
-                if (TCPIP_UDP_PutIsReady(sUart8ServerSocket) >= 0)
-                {
-                    SYS_CONSOLE_PRINT("Write %d bytes on UART8 UDP Server\n\r", modbusMessage.length);
-                    TCPIP_UDP_ArrayPut(sUart8ServerSocket, modbusMessage.buffer, modbusMessage.length);
-                    (void)TCPIP_UDP_Flush(sUart8ServerSocket);
-                }
-
-                // Clear message buffer safely
-                memset(modbusMessage.buffer, 0, sizeof(modbusMessage.buffer));
-                modbusMessage.index = 0U;
-                modbusMessage.length = 0U;
-            }             
-        #endif
-    }
-    vTaskDelay(10);
-}
-
-/*
- * @brief   UART9 Server Task Handler
- * @details This function continuously monitors the UART9 server socket.
- *          It reads incoming data from the socket and transmits it over RS485.
- *          If the connection is lost, it attempts to reconnect.
- *
- * @param   pvParameters - Pointer to task parameters (unused in this function).
- *
- * @return  None (This function runs indefinitely in a loop).
- */
-void vUart9HandlerServerTask(void *pvParameters)
-{
-    SYS_CONSOLE_PRINT("In Function: %s\r\n", __FUNCTION__);
-#if HEV_IO_Aggregator
-    uint8_t u8UART9Buffer[128] = {0};    
-    ModbusMessage_t modbusMessage;
-    TickType_t lastReconnectAttempt = 0;
-#endif    
-
-    while (true)
-    {
-        #if HEV_IO_Aggregator
-                // Handle data from queue (Modbus TX to client)
-                if (xQueueReceive(xUart9QueueHandler, &modbusMessage, pdMS_TO_TICKS(50)) == pdPASS)
-                {
-                    if (TCPIP_TCP_IsConnected(sUart9ServerSocket))
-                    {
-                        SYS_CONSOLE_PRINT("Write %d bytes on UART9 Server\n\r", modbusMessage.length);
-                        TCPIP_TCP_ArrayPut(sUart9ServerSocket, modbusMessage.buffer, modbusMessage.length);
-                    }
-
-                    // Clear message buffer safely
-                    memset(modbusMessage.buffer, 0, sizeof(modbusMessage.buffer));
-                    modbusMessage.index = 0U;
-                    modbusMessage.length = 0U;
-                }
-                else
-                {
-                    // No queue data ? check for TCP receive
-                    if (TCPIP_TCP_IsConnected(sUart9ServerSocket))
-                    {
-                        int16_t bytesRead = TCPIP_TCP_ArrayGet(sUart9ServerSocket, u8UART9Buffer, sizeof(u8UART9Buffer));
-                        if (bytesRead > 0)
-                        {
-                            SYS_CONSOLE_PRINT("Got Data on RS485_2 Server Handler - Data Send to UART9\r\n");
-                            RS485_TransmitData_UART9(u8UART9Buffer, bytesRead);
-                        }
-                        if (!TCPIP_TCP_IsConnected(sUart9ServerSocket) || TCPIP_TCP_WasDisconnected(sUart9ServerSocket)) {
-                            SYS_CONSOLE_PRINT("\r\nTCP RS485_2 Connection Closed\r\n");
-                            TCPIP_TCP_Close(sUart9ServerSocket);
-                            sUart9ServerSocket = INVALID_SOCKET;
-                        }                         
-                    }
-                }
-
-                // Smart reconnect handling every 3 seconds
-                if (sUart9ServerSocket == INVALID_SOCKET)
-                {
-                    TickType_t currentTime = xTaskGetTickCount();
-                    if ((currentTime - lastReconnectAttempt) > pdMS_TO_TICKS(3000))
-                    {
-                        lastReconnectAttempt = currentTime;
-
-                        sUart9ServerSocket = TCPIP_TCP_ServerOpen(IP_ADDRESS_TYPE_IPV4, writeData.rs485Ports[1], 0);
-                        if (sUart9ServerSocket == INVALID_SOCKET)
-                        {
-                            SYS_CONSOLE_PRINT("Failed to reopen RS485_2 socket, retrying...\r\n");
-                        }
-                        else
-                        {
-                            SYS_CONSOLE_PRINT("RS485_2 socket reopened successfully\r\n");
-                        }
-                    }
-                }
-
-        #elif Two_Wheeler_IO_Aggregator
-            int16_t availableBytesUART9 = TCPIP_UDP_GetIsReady(sUart9ServerSocket);
-            if (availableBytesUART9 > 0) 
-            {
-                uint8_t u8Uart9Buffer[64];  // Adjust buffer size if needed
-                memset(u8Uart9Buffer, 0, sizeof(u8Uart9Buffer));
-                int bytesReceived = TCPIP_UDP_ArrayGet(sUart9ServerSocket, u8Uart9Buffer, sizeof(u8Uart9Buffer));
-                if (bytesReceived > 0) 
-                {
-                    SYS_CONSOLE_PRINT("Received UDP Data on UART9 (Length: %d): ", bytesReceived);
-                    for (int i = 0; i < bytesReceived; i++) 
-                    {
-                        SYS_CONSOLE_PRINT("%02X ", u8Uart9Buffer[i]);
-                    }
-                    SYS_CONSOLE_PRINT("\r\n");
-                    RS485_TransmitData_UART9(u8Uart9Buffer, bytesReceived);
-                }
-                TCPIP_UDP_Discard(sUart9ServerSocket);  // Free the RX buffer
-            }
-
-            // Ensure reconnection logic is handled correctly
-            if (sUart9ServerSocket == INVALID_SOCKET) {
-                sUart9ServerSocket = TCPIP_UDP_ServerOpen(IP_ADDRESS_TYPE_IPV4, UART9_SERVER_PORT, 0);
-
-                if (sUart9ServerSocket == INVALID_SOCKET) {
-                    SYS_CONSOLE_PRINT("Failed to reopen RS485_2 socket, retrying...\r\n");
-                } 
-                vTaskDelay(RECONNECT_DELAY_MS);
-            }
-
-            static ModbusMessage_t modbusMessageUART9; // Ensure ModbusMessage_t is defined
-
-            if (xQueueReceive(xUart9QueueHandler, &modbusMessageUART9, (TickType_t) 10) == pdPASS)
-            {
-                if (TCPIP_UDP_PutIsReady(sUart9ServerSocket) >= 0)
-                {
-                    SYS_CONSOLE_PRINT("Write %d bytes on UART9 UDP Server\n\r", modbusMessageUART9.length);
-                    TCPIP_UDP_ArrayPut(sUart9ServerSocket, modbusMessageUART9.buffer, modbusMessageUART9.length);
-                    (void)TCPIP_UDP_Flush(sUart9ServerSocket);
-                }
-
-                // Clear message buffer safely
-                memset(modbusMessageUART9.buffer, 0, sizeof(modbusMessageUART9.buffer));
-                modbusMessageUART9.index = 0U;
-                modbusMessageUART9.length = 0U;
-            } 
-        #endif
-    }
-    vTaskDelay(10);
-}
-
-
-void SERCOM8_USART_ReadCallback(uintptr_t context) {
-    uint8_t byte;
-    if (!SERCOM8_USART_ReadIsBusy()) {
-        if (!SERCOM8_USART_Read(&byte, 1))
+        switch (pxResp->eFuncCode)
         {
-            SYS_CONSOLE_PRINT("RS485 channel 1: Read error (overrun or not ready)\r\n");
-            ReportError(ERR_RS485_1_OVERRUN);
-        }
-        if (modbusRxIndex8 < MODBUS_MAX_LEN) {
-            modbusRxBuffer8[modbusRxIndex8++] = byte;
-        }
-        TCC0_TimerStop();
-        TCC0_TimerStart();
-    }
-}
+            case MB_FC_READ_HOLDING_REGISTERS:
+            {
+                /* Each register = 2 bytes, big-endian in response */
+                uint8_t  u8Idx;
+                uint16_t u16RegVal;
 
-void SERCOM9_USART_ReadCallback(uintptr_t context) {
-    uint8_t byte;
-    if (!SERCOM9_USART_ReadIsBusy()) {
-        if (!SERCOM9_USART_Read(&byte, 1))
+                for (u8Idx = 0U; u8Idx < (pxResp->u8DataLen / 2U); u8Idx++)
+                {
+                    u16RegVal = ((uint16_t)pxResp->au8Data[u8Idx * 2U] << 8U)
+                              | ((uint16_t)pxResp->au8Data[(u8Idx * 2U) + 1U]);
+
+                    SYS_CONSOLE_PRINT("  Reg[%u] = 0x%04X (%u)\r\n",
+                                       (unsigned)u8Idx,
+                                       (unsigned)u16RegVal,
+                                       (unsigned)u16RegVal);
+
+                    /*
+                     * TODO: Route register values to appropriate application state.
+                     * Example: u16StoreLedModuleRegister(u8Idx, u16RegVal);
+                     */
+                }
+                break;
+            }
+
+            case MB_FC_WRITE_SINGLE_REGISTER:
+            case MB_FC_WRITE_MULTIPLE_REGISTERS:
+                /* Echo response — success confirmation only */
+                SYS_CONSOLE_PRINT("[App RS485 CH%u] Write acknowledged\r\n",
+                                   (unsigned)eChannel);
+                break;
+
+            default:
+                break;
+        }
+    }
+    else if (eResult == MB_RESULT_ERR_EXCEPTION)
+    {
+        if (pxResp != NULL)
         {
-            SYS_CONSOLE_PRINT("RS485 channel 2: Read error (overrun or not ready)\r\n");
-            ReportError(ERR_RS485_2_OVERRUN);
+            SYS_CONSOLE_PRINT("[App RS485 CH%u] Slave exception 0x%02X (FC=0x%02X)\r\n",
+                               (unsigned)eChannel,
+                               (unsigned)pxResp->eExceptionCode,
+                               (unsigned)pxResp->eFuncCode);
         }
-        if (modbusRxIndex9 < MODBUS_MAX_LEN) {
-            modbusRxBuffer9[modbusRxIndex9++] = byte;
-        }
-        TCC1_TimerStop();
-        TCC1_TimerStart();
     }
-}
+    else
+    {
+        SYS_CONSOLE_PRINT("[App RS485 CH%u] Transaction failed, err=%u\r\n",
+                           (unsigned)eChannel, (unsigned)eResult);
 
-void TCC0_Callback_InterruptHandler(uint32_t status, uintptr_t context) {
-    __DMB();
-    TCC0_TimerStop();
-    if (modbusRxIndex8 > 0) {
-        modbusFrameReady8 = true;
+        /*
+         * TODO: Integrate with your error reporting system:
+         * ReportError(eChannel == UART_PORT_CH1 ? ERR_RS485_1_NO_RESPONSE
+         *                                       : ERR_RS485_2_NO_RESPONSE);
+         */
     }
-}
-
-void TCC1_Callback_InterruptHandler(uint32_t status, uintptr_t context) {
-    __DMB();
-    TCC1_TimerStop();
-    if (modbusRxIndex9 > 0) {
-        modbusFrameReady9 = true;
-    }
-}
-
-void vUartRxHandlerTask(void *pvParameters) {
-    while (1) {
-        // ---------- UART8 Handler ----------
-        bool frameReady8 = false;
-        taskENTER_CRITICAL();
-        if (modbusFrameReady8) {
-            modbusFrameReady8 = false;
-            frameReady8 = true;
-        }
-        taskEXIT_CRITICAL();
-
-        if (frameReady8) {
-            uint16_t crc8 = CalculateModbusCRC((const uint8_t *)modbusRxBuffer8, modbusRxIndex8 - 2U);
-            uint16_t frameCrc8 = (uint16_t)modbusRxBuffer8[modbusRxIndex8 - 2U] |
-                                 ((uint16_t)modbusRxBuffer8[modbusRxIndex8 - 1U] << 8U);
-
-            if (crc8 == frameCrc8) {
-                SYS_CONSOLE_PRINT("RS485_1 Frame (%d bytes): ", modbusRxIndex8);
-                for (size_t i = 0U; i < modbusRxIndex8; i++) {
-                    SYS_CONSOLE_PRINT("%02X ", modbusRxBuffer8[i]);
-                }
-                SYS_CONSOLE_PRINT("\r\n");
-
-                ModbusMessage_t msg;
-                memcpy(msg.buffer, (const void *)modbusRxBuffer8, modbusRxIndex8);
-                msg.index = modbusRxIndex8;
-                msg.length = modbusRxIndex8;
-
-                if (xQueueSend(xUart8QueueHandler, &msg, 10U) != pdPASS) {
-                    SYS_CONSOLE_PRINT("Failed to send message in UART8 queue\r\n");
-                }
-            } else {
-                ReportError(ERR_RS485_1_INVALID_CRC);
-                SYS_CONSOLE_PRINT("RS485_1 CRC Invalid\r\n");
-            }
-
-            for (size_t i = 0U; i < MODBUS_MAX_LEN; i++) {
-                modbusRxBuffer8[i] = 0U;
-            }
-            modbusRxIndex8 = 0U;
-            uint8_t dummy;
-            SERCOM8_USART_Read(&dummy, 1U);
-        }
-
-        // ---------- UART9 Handler ----------
-        bool frameReady9 = false;
-        taskENTER_CRITICAL();
-        if (modbusFrameReady9) {
-            modbusFrameReady9 = false;
-            frameReady9 = true;
-        }
-        taskEXIT_CRITICAL();
-
-        if (frameReady9) {
-            uint16_t crc9 = CalculateModbusCRC((const uint8_t *)modbusRxBuffer9, modbusRxIndex9 - 2U);
-            uint16_t frameCrc9 = (uint16_t)modbusRxBuffer9[modbusRxIndex9 - 2U] |
-                                 ((uint16_t)modbusRxBuffer9[modbusRxIndex9 - 1U] << 8U);
-
-            if (crc9 == frameCrc9) {
-                SYS_CONSOLE_PRINT("RS485_2 Frame (%d bytes): ", modbusRxIndex9);
-                for (size_t i = 0U; i < modbusRxIndex9; i++) {
-                    SYS_CONSOLE_PRINT("%02X ", modbusRxBuffer9[i]);
-                }
-                SYS_CONSOLE_PRINT("\r\n");
-
-                ModbusMessage_t msg;
-                memcpy(msg.buffer, (const void *)modbusRxBuffer9, modbusRxIndex9);
-                msg.index = modbusRxIndex9;
-                msg.length = modbusRxIndex9;
-
-                if (xQueueSend(xUart9QueueHandler, &msg, 10U) != pdPASS) {
-                    SYS_CONSOLE_PRINT("Failed to send message in UART9 queue\r\n");
-                }
-            } else {
-                ReportError(ERR_RS485_2_INVALID_CRC);
-                SYS_CONSOLE_PRINT("RS485_2 CRC Invalid\r\n");
-            }
-
-            for (size_t i = 0U; i < MODBUS_MAX_LEN; i++) {
-                modbusRxBuffer9[i] = 0U;
-            }
-            modbusRxIndex9 = 0U;
-            uint8_t dummy;
-            SERCOM9_USART_Read(&dummy, 1U);
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(2U));
-    }
-}
-
-/*
- * @brief   Initializes RS485 Handlers
- * @details This function registers USART read callbacks for SERCOM8 and SERCOM9
- *          and creates tasks for UART8 and UART9 server handlers.
- *
- * @param   void
- * @return  void
- */
-void vRS485HandlerInit(void)
-{
-    static uint8_t dummy = 0U;
-
-    /* Register SERCOM8 USART read callback */
-    (void)SERCOM8_USART_ReadCallbackRegister(SERCOM8_USART_ReadCallback, (uintptr_t)0);
-    (void)SERCOM8_USART_Read(&dummy, 1U);
-
-    /* Register TCC0 timer callback */
-    (void)TCC0_TimerCallbackRegister(TCC0_Callback_InterruptHandler, (uintptr_t)0);
-
-#if HEV_IO_Aggregator
-    /* Register SERCOM9 USART read callback */
-    (void)SERCOM9_USART_ReadCallbackRegister(SERCOM9_USART_ReadCallback, (uintptr_t)0);
-    (void)SERCOM9_USART_Read(&dummy, 1U);
-
-    /* Register TCC1 timer callback */
-    (void)TCC1_TimerCallbackRegister(TCC1_Callback_InterruptHandler, (uintptr_t)0);
-#endif
-
-    /* Create UART RX Handler Task */
-    xTaskCreate(
-        vUartRxHandlerTask,
-        "UART_Modbus_Task",
-        UART_RX_HANDLER_HEAP_DEPTH,
-        NULL,
-        UART_RX_HANDLER_TASK_PRIORITY,
-        NULL
-    );
-    xUart8QueueHandler = xQueueCreate((UBaseType_t)10, sizeof(ModbusMessage_t));
-#if HEV_IO_Aggregator
-        xUart9QueueHandler = xQueueCreate((UBaseType_t)10, sizeof(ModbusMessage_t));
-        if ((xUart8QueueHandler != NULL) && (xUart9QueueHandler != NULL))
-        {
-            (void)SYS_CONSOLE_PRINT("UARTRX Queue create success\r\n");
-        }
-#endif
-        /* Create UART8 Handler Server Task */
-        (void)xTaskCreate(
-            vUart8HandlerServerTask,
-            "UART8_Handler_Task",
-            UART_SERVER_HANDLER_HEAP_DEPTH,
-            NULL,
-            UART_SERVER_HANDLER_TASK_PRIORITY,
-            NULL
-        );
-
-#if HEV_IO_Aggregator
-        /* Create UART9 Handler Server Task */
-        (void)xTaskCreate(
-            vUart9HandlerServerTask,
-            "UART9_Handler_Task",
-            UART_SERVER_HANDLER_HEAP_DEPTH,
-            NULL,
-            UART_SERVER_HANDLER_TASK_PRIORITY,
-            NULL
-        );
-#endif
 }
 
 /* =========================================================================
- * Function Definitions
+ * Private: Application Task
+ * =========================================================================
+ * Single FreeRTOS task that:
+ *   1. Drives the Modbus master state machine (both channels).
+ *   2. Issues periodic business-logic requests on a timer.
  * ========================================================================= */
 
-void RS485_Output_1_Set(void)   { }
-void RS485_Output_1_Clear(void) { }
+/**
+ * @brief  RS485 Modbus master application task.
+ *
+ * @details Runs at RS485_TASK_PRIORITY.  Periodically calls:
+ *          - Modbus_Master_Process() to drive the state machine
+ *          - Application request functions to send Modbus commands
+ */
+static void prv_RS485AppTask(void *pvParameters)
+{
+    TickType_t xLastRequestTick;
+    uint32_t   u32RequestIntervalTicks;
 
-void RS485_Output_2_Set(void)   { }
-void RS485_Output_2_Clear(void) { }
+    (void)pvParameters;
 
-void RS485_Output_3_Set(void)   { }
-void RS485_Output_3_Clear(void) { }
+    xLastRequestTick        = xTaskGetTickCount();
+    u32RequestIntervalTicks = pdMS_TO_TICKS(RS485_APP_REQUEST_INTERVAL_MS);
 
-void RS485_Output_4_Set(void)   { }
-void RS485_Output_4_Clear(void) { }
+    SYS_CONSOLE_PRINT("[App RS485] Task started\r\n");
 
-void RS485_Output_5_Set(void)   { }
-void RS485_Output_5_Clear(void) { }
+    while (true)
+    {
+        /* --- Drive both master state machines --- */
+        // Modbus_Master_Process(&s_xMasterCh1);
+        // Modbus_Master_Process(&s_xMasterCh2);
 
-void RS485_Output_6_Set(void)   { }
-void RS485_Output_6_Clear(void) { }
+        /* --- Scheduled application requests (every RS485_APP_REQUEST_INTERVAL_MS) --- */
+        if ((xTaskGetTickCount() - xLastRequestTick) >= u32RequestIntervalTicks)
+        {
+            xLastRequestTick = xTaskGetTickCount();
 
-void RS485_Output_7_Set(void)   { }
-void RS485_Output_7_Clear(void) { }
+            /*
+             * Example: write LED states periodically.
+             * Only submit if master is idle (non-blocking check).
+             */
+            if (Modbus_Master_IsIdle(&s_xMasterCh1))
+            {
+                vLED_ModuleWrite();
+            }
+        }
 
-void RS485_Output_8_Set(void)   { }
-void RS485_Output_8_Clear(void) { }
+        /* Yield for RS485_MASTER_POLL_MS */
+        vTaskDelay(pdMS_TO_TICKS(RS485_MASTER_POLL_MS));
+    }
+}
 
-void RS485_Output_9_Set(void)   { }
-void RS485_Output_9_Clear(void) { }
+/* =========================================================================
+ * Public Function Implementations — Lifecycle
+ * ========================================================================= */
 
-void RS485_Output_10_Set(void)   { }
-void RS485_Output_10_Clear(void) { }
+void vRS485HandlerInit(void)
+{
+    ModbusMaster_Result_t eResult;
 
-void RS485_Output_11_Set(void)   { }
-void RS485_Output_11_Clear(void) { }
+    SYS_CONSOLE_PRINT("[App RS485] Initialising Modbus Master stack...\r\n");
 
-void RS485_Output_12_Set(void)   { }
-void RS485_Output_12_Clear(void) { }
+    /* ------------------------------------------------------------------ */
+    /* Channel 1 — LED / OP Card bus (SERCOM8)                            */
+    /* ------------------------------------------------------------------ */
+    eResult = Modbus_Master_Init(&s_xMasterCh1, UART_PORT_CH1);
+    if (eResult != MB_RESULT_SUCCESS)
+    {
+        SYS_CONSOLE_PRINT("[App RS485] CH1 init failed (%u)\r\n", (unsigned)eResult);
+    }
+    else
+    {
+        Modbus_Master_RegisterCallback(&s_xMasterCh1,
+                                        prv_ModbusResultCallback,
+                                        NULL);
+        SYS_CONSOLE_PRINT("[App RS485] CH1 ready\r\n");
+    }
 
-void RS485_Output_13_Set(void)   { }
-void RS485_Output_13_Clear(void) { }
+    /* ------------------------------------------------------------------ */
+    /* Channel 2 — Reserved / future slave devices (SERCOM9)              */
+    /* ------------------------------------------------------------------ */
+    // eResult = Modbus_Master_Init(&s_xMasterCh2, UART_PORT_CH2);
+    // if (eResult != MB_RESULT_SUCCESS)
+    // {
+    //     SYS_CONSOLE_PRINT("[App RS485] CH2 init failed (%u)\r\n", (unsigned)eResult);
+    // }
+    // else
+    // {
+    //     Modbus_Master_RegisterCallback(&s_xMasterCh2,
+    //                                     prv_ModbusResultCallback,
+    //                                     NULL);
+    //     SYS_CONSOLE_PRINT("[App RS485] CH2 ready\r\n");
+    // }
 
-void RS485_Output_14_Set(void)   { }
-void RS485_Output_14_Clear(void) { }
+    /* ------------------------------------------------------------------ */
+    /* Create unified application task                                     */
+    /* ------------------------------------------------------------------ */
+    (void)xTaskCreate(
+        prv_RS485AppTask,
+        "RS485_App_Task",
+        RS485_TASK_HEAP_DEPTH,
+        NULL,
+        RS485_TASK_PRIORITY,
+        NULL
+    );
 
-void RS485_Output_15_Set(void)   { }
-void RS485_Output_15_Clear(void) { }
+    SYS_CONSOLE_PRINT("[App RS485] Initialisation complete\r\n");
+}
 
-void RS485_Output_16_Set(void)   { }
-void RS485_Output_16_Clear(void) { }
+/* =========================================================================
+ * Public Function Implementations — LED Module Operations
+ * ========================================================================= */
 
-void RS485_Output_17_Set(void)   { }
-void RS485_Output_17_Clear(void) { }
+void vLED_ModuleWrite(void)
+{
+    ModbusMaster_Result_t eResult;
+    uint16_t              au16Values[LED_MOD_WRITE_REG_NO];
+    uint8_t               u8Idx;
 
-void RS485_Output_18_Set(void)   { }
-void RS485_Output_18_Clear(void) { }
+    /* Gather local LED state for each dock */
+    for (u8Idx = DOCK_1; u8Idx < (uint8_t)MAX_DOCKS; u8Idx++)
+    {
+        au16Values[u8Idx] = u16GetLocalLedState(u8Idx);
+    }
 
-uint8_t RS485_Output_1_Get(void)  { return 0U; }
-uint8_t RS485_Output_2_Get(void)  { return 0U; }
-uint8_t RS485_Output_3_Get(void)  { return 0U; }
-uint8_t RS485_Output_4_Get(void)  { return 0U; }
-uint8_t RS485_Output_5_Get(void)  { return 0U; }
-uint8_t RS485_Output_6_Get(void)  { return 0U; }
-uint8_t RS485_Output_7_Get(void)  { return 0U; }
-uint8_t RS485_Output_8_Get(void)  { return 0U; }
-uint8_t RS485_Output_9_Get(void)  { return 0U; }
-uint8_t RS485_Output_10_Get(void) { return 0U; }
-uint8_t RS485_Output_11_Get(void) { return 0U; }
-uint8_t RS485_Output_12_Get(void) { return 0U; }
-uint8_t RS485_Output_13_Get(void) { return 0U; }
-uint8_t RS485_Output_14_Get(void) { return 0U; }
-uint8_t RS485_Output_15_Get(void) { return 0U; }
-uint8_t RS485_Output_16_Get(void) { return 0U; }
-uint8_t RS485_Output_17_Get(void) { return 0U; }
-uint8_t RS485_Output_18_Get(void) { return 0U; }
+    /* Submit Write Multiple Registers request to LED module */
+    eResult = Modbus_WriteMultipleRegisters(
+                  &s_xMasterCh1,
+                  (uint8_t)LED_MOD_ADD,
+                  (uint16_t)LED_MOD_WRITE_READ_REG_ADD,
+                  au16Values,
+                  (uint8_t)LED_MOD_WRITE_REG_NO
+              );
+
+    if (eResult == MB_RESULT_ERR_BUSY)
+    {
+        SYS_CONSOLE_PRINT("[App RS485] LED write skipped — master busy\r\n");
+    }
+    else if (eResult != MB_RESULT_SUCCESS)
+    {
+        SYS_CONSOLE_PRINT("[App RS485] LED write submit error %u\r\n", (unsigned)eResult);
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+
+void vLED_ModuleReadFWVersion(void)
+{
+    ModbusMaster_Result_t eResult;
+
+    eResult = Modbus_ReadHoldingRegisters(
+                  &s_xMasterCh1,
+                  (uint8_t)LED_MOD_ADD,
+                  (uint16_t)LED_MOD_FWVERSION_READ_ADD,
+                  (uint16_t)LED_MOD_READ_REG_NO
+              );
+
+    if (eResult == MB_RESULT_ERR_BUSY)
+    {
+        SYS_CONSOLE_PRINT("[App RS485] FW version read skipped — master busy\r\n");
+    }
+    else if (eResult != MB_RESULT_SUCCESS)
+    {
+        SYS_CONSOLE_PRINT("[App RS485] FW version read submit error %u\r\n",
+                           (unsigned)eResult);
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+
+void vLED_ModuleReadState(void)
+{
+    ModbusMaster_Result_t eResult;
+
+    eResult = Modbus_ReadHoldingRegisters(
+                  &s_xMasterCh1,
+                  (uint8_t)LED_MOD_ADD,
+                  (uint16_t)LED_MOD_WRITE_READ_REG_ADD,
+                  (uint16_t)LED_MOD_WRITE_REG_NO
+              );
+
+    if (eResult == MB_RESULT_ERR_BUSY)
+    {
+        SYS_CONSOLE_PRINT("[App RS485] LED state read skipped — master busy\r\n");
+    }
+    else if (eResult != MB_RESULT_SUCCESS)
+    {
+        SYS_CONSOLE_PRINT("[App RS485] LED state read submit error %u\r\n",
+                           (unsigned)eResult);
+    }
+}
+
+/* =========================================================================
+ * Public Function Implementations — Diagnostics
+ * ========================================================================= */
+
+void vRS485_PrintDiagnostics(void)
+{
+    ModbusMaster_Diagnostics_t xDiag;
+
+    /* Channel 1 */
+    Modbus_Master_GetDiagnostics(&s_xMasterCh1, &xDiag);
+    SYS_CONSOLE_PRINT("--- RS485 CH1 Diagnostics ---\r\n");
+    SYS_CONSOLE_PRINT("  TX Requests : %lu\r\n", (unsigned long)xDiag.u32TxRequests);
+    SYS_CONSOLE_PRINT("  RX Success  : %lu\r\n", (unsigned long)xDiag.u32RxSuccess);
+    SYS_CONSOLE_PRINT("  Retries     : %lu\r\n", (unsigned long)xDiag.u32Retries);
+    SYS_CONSOLE_PRINT("  Err Timeout : %lu\r\n", (unsigned long)xDiag.u32ErrTimeout);
+    SYS_CONSOLE_PRINT("  Err CRC     : %lu\r\n", (unsigned long)xDiag.u32ErrCRC);
+    SYS_CONSOLE_PRINT("  Err Except  : %lu\r\n", (unsigned long)xDiag.u32ErrException);
+    SYS_CONSOLE_PRINT("  Err Overflow: %lu\r\n", (unsigned long)xDiag.u32ErrOverflow);
+    SYS_CONSOLE_PRINT("  Err HW      : %lu\r\n", (unsigned long)xDiag.u32ErrHW);
+
+    // /* Channel 2 */
+    // Modbus_Master_GetDiagnostics(&s_xMasterCh2, &xDiag);
+    // SYS_CONSOLE_PRINT("--- RS485 CH2 Diagnostics ---\r\n");
+    // SYS_CONSOLE_PRINT("  TX Requests : %lu\r\n", (unsigned long)xDiag.u32TxRequests);
+    // SYS_CONSOLE_PRINT("  RX Success  : %lu\r\n", (unsigned long)xDiag.u32RxSuccess);
+    // SYS_CONSOLE_PRINT("  Retries     : %lu\r\n", (unsigned long)xDiag.u32Retries);
+    // SYS_CONSOLE_PRINT("  Err Timeout : %lu\r\n", (unsigned long)xDiag.u32ErrTimeout);
+    // SYS_CONSOLE_PRINT("  Err CRC     : %lu\r\n", (unsigned long)xDiag.u32ErrCRC);
+    // SYS_CONSOLE_PRINT("  Err Except  : %lu\r\n", (unsigned long)xDiag.u32ErrException);
+    // SYS_CONSOLE_PRINT("  Err Overflow: %lu\r\n", (unsigned long)xDiag.u32ErrOverflow);
+    // SYS_CONSOLE_PRINT("  Err HW      : %lu\r\n", (unsigned long)xDiag.u32ErrHW);
+}
+
+/* =========================================================================
+ * Stub Implementation — u16GetLocalLedState
+ * =========================================================================
+ * Replace this with your actual LED state manager implementation.
+ * ========================================================================= */
+
+/**
+ * @brief  Stub: return LED state for a dock.
+ *         Replace with real implementation from LED state module.
+ */
+uint16_t u16GetLocalLedState(uint8_t u8Dock)
+{
+    /* Placeholder — return 0 for all docks until real state manager exists */
+    (void)u8Dock;
+    return 0U;
+}
+
+// void RS485_Output_1_Set(void)   { }
+// void RS485_Output_1_Clear(void) { }
+
+// void RS485_Output_2_Set(void)   { }
+// void RS485_Output_2_Clear(void) { }
+
+// void RS485_Output_3_Set(void)   { }
+// void RS485_Output_3_Clear(void) { }
+
+// void RS485_Output_4_Set(void)   { }
+// void RS485_Output_4_Clear(void) { }
+
+// void RS485_Output_5_Set(void)   { }
+// void RS485_Output_5_Clear(void) { }
+
+// void RS485_Output_6_Set(void)   { }
+// void RS485_Output_6_Clear(void) { }
+
+// void RS485_Output_7_Set(void)   { }
+// void RS485_Output_7_Clear(void) { }
+
+// void RS485_Output_8_Set(void)   { }
+// void RS485_Output_8_Clear(void) { }
+
+// void RS485_Output_9_Set(void)   { }
+// void RS485_Output_9_Clear(void) { }
+
+// void RS485_Output_10_Set(void)   { }
+// void RS485_Output_10_Clear(void) { }
+
+// void RS485_Output_11_Set(void)   { }
+// void RS485_Output_11_Clear(void) { }
+
+// void RS485_Output_12_Set(void)   { }
+// void RS485_Output_12_Clear(void) { }
+
+// void RS485_Output_13_Set(void)   { }
+// void RS485_Output_13_Clear(void) { }
+
+// void RS485_Output_14_Set(void)   { }
+// void RS485_Output_14_Clear(void) { }
+
+// void RS485_Output_15_Set(void)   { }
+// void RS485_Output_15_Clear(void) { }
+
+// void RS485_Output_16_Set(void)   { }
+// void RS485_Output_16_Clear(void) { }
+
+// void RS485_Output_17_Set(void)   { }
+// void RS485_Output_17_Clear(void) { }
+
+// void RS485_Output_18_Set(void)   { }
+// void RS485_Output_18_Clear(void) { }
+
+// uint8_t RS485_Output_1_Get(void)  { return 0U; }
+// uint8_t RS485_Output_2_Get(void)  { return 0U; }
+// uint8_t RS485_Output_3_Get(void)  { return 0U; }
+// uint8_t RS485_Output_4_Get(void)  { return 0U; }
+// uint8_t RS485_Output_5_Get(void)  { return 0U; }
+// uint8_t RS485_Output_6_Get(void)  { return 0U; }
+// uint8_t RS485_Output_7_Get(void)  { return 0U; }
+// uint8_t RS485_Output_8_Get(void)  { return 0U; }
+// uint8_t RS485_Output_9_Get(void)  { return 0U; }
+// uint8_t RS485_Output_10_Get(void) { return 0U; }
+// uint8_t RS485_Output_11_Get(void) { return 0U; }
+// uint8_t RS485_Output_12_Get(void) { return 0U; }
+// uint8_t RS485_Output_13_Get(void) { return 0U; }
+// uint8_t RS485_Output_14_Get(void) { return 0U; }
+// uint8_t RS485_Output_15_Get(void) { return 0U; }
+// uint8_t RS485_Output_16_Get(void) { return 0U; }
+// uint8_t RS485_Output_17_Get(void) { return 0U; }
+// uint8_t RS485_Output_18_Get(void) { return 0U; }
+/*******************************************************************************
+ * End of File
+ *******************************************************************************/

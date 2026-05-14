@@ -382,10 +382,10 @@ TCPIP_HTTP_NET_IO_RESULT TCPIP_HTTP_NET_ConnectionPostExecute(TCPIP_HTTP_NET_CON
                             SYS_CONSOLE_PRINT("Updated %s to port %d\n", interfaceItem->valuestring, tcpPort);
                         }
 #if HEV_IO_Aggregator                         
-                        TCPIP_TCP_Close(sUart8ServerSocket);
-                        sUart8ServerSocket = INVALID_SOCKET;
-                        TCPIP_TCP_Close(sUart9ServerSocket);
-                        sUart9ServerSocket = INVALID_SOCKET;  
+                        // TCPIP_TCP_Close(sUart8ServerSocket);
+                        // sUart8ServerSocket = INVALID_SOCKET;
+                        // TCPIP_TCP_Close(sUart9ServerSocket);
+                        // sUart9ServerSocket = INVALID_SOCKET;  
 #endif                        
                     }
                 }
