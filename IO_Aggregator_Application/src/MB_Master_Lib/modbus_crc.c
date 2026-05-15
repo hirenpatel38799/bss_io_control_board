@@ -12,7 +12,7 @@
  * Included Files
  * ========================================================================= */
 #include "modbus_crc.h"
-
+#include "definitions.h"    /* SYS_CONSOLE_PRINT */
 /* =========================================================================
  * Private Macro Definitions
  * ========================================================================= */
@@ -78,6 +78,7 @@ bool Modbus_CRC16_Validate(const uint8_t *pu8Frame, uint16_t u16Length)
     u16Received = (uint16_t)pu8Frame[u16Length - 2U]
                 | ((uint16_t)pu8Frame[u16Length - 1U] << 8U);
 
+    // SYS_CONSOLE_PRINT("Computed CRC=0x%04X, Received CRC=0x%04X\r\n", (unsigned)u16Computed, (unsigned)u16Received);
     return (u16Computed == u16Received);
 }
 

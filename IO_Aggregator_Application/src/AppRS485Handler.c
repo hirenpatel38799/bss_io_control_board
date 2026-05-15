@@ -65,10 +65,10 @@ static void prv_ModbusResultCallback(UartPort_Channel_t         eChannel,
             return;
         }
 
-        SYS_CONSOLE_PRINT("[App RS485 CH%u] Success FC=0x%02X DataLen=%u\r\n",
+        /*SYS_CONSOLE_PRINT("[App RS485 CH%u] Success FC=0x%02X DataLen=%u\r\n",
                            (unsigned)eChannel,
                            (unsigned)pxResp->eFuncCode,
-                           (unsigned)pxResp->u8DataLen);
+                           (unsigned)pxResp->u8DataLen);*/
 
         switch (pxResp->eFuncCode)
         {
@@ -99,8 +99,8 @@ static void prv_ModbusResultCallback(UartPort_Channel_t         eChannel,
             case MB_FC_WRITE_SINGLE_REGISTER:
             case MB_FC_WRITE_MULTIPLE_REGISTERS:
                 /* Echo response — success confirmation only */
-                SYS_CONSOLE_PRINT("[App RS485 CH%u] Write acknowledged\r\n",
-                                   (unsigned)eChannel);
+                /*SYS_CONSOLE_PRINT("[App RS485 CH%u] Write acknowledged\r\n",
+                                   (unsigned)eChannel);*/
                 break;
 
             default:
@@ -160,7 +160,7 @@ static void prv_RS485AppTask(void *pvParameters)
     while (true)
     {
         /* --- Drive both master state machines --- */
-        // Modbus_Master_Process(&s_xMasterCh1);
+        Modbus_Master_Process(&s_xMasterCh1);
         // Modbus_Master_Process(&s_xMasterCh2);
 
         /* --- Scheduled application requests (every RS485_APP_REQUEST_INTERVAL_MS) --- */
@@ -247,11 +247,11 @@ void vRS485HandlerInit(void)
 void vLED_ModuleWrite(void)
 {
     ModbusMaster_Result_t eResult;
-    uint16_t              au16Values[LED_MOD_WRITE_REG_NO];
+    uint16_t              au16Values[DOCK_3];
     uint8_t               u8Idx;
 
     /* Gather local LED state for each dock */
-    for (u8Idx = DOCK_1; u8Idx < (uint8_t)MAX_DOCKS; u8Idx++)
+    for (u8Idx = 0; u8Idx < (uint8_t)DOCK_3; u8Idx++)
     {
         au16Values[u8Idx] = u16GetLocalLedState(u8Idx);
     }
@@ -262,7 +262,7 @@ void vLED_ModuleWrite(void)
                   (uint8_t)LED_MOD_ADD,
                   (uint16_t)LED_MOD_WRITE_READ_REG_ADD,
                   au16Values,
-                  (uint8_t)LED_MOD_WRITE_REG_NO
+                  (uint8_t)DOCK_3
               );
 
     if (eResult == MB_RESULT_ERR_BUSY)
