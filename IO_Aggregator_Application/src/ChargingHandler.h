@@ -591,19 +591,19 @@ bool bGetSetTVSBMSData(uint8_t u8DockNo,
  * SECTION C: COMMON LED / STATE ENUMERATIONS
  * (shared by both protocols)
  * ============================================================ */
-typedef enum
-{
-    LED_RED   = 1U,
-    LED_GREEN = 2U,
-    LED_BLUE  = 3U,
-    LED_NAME_MAX
-} ledname_e;
+// typedef enum
+// {
+//     LED_RED   = 1U,
+//     LED_GREEN = 2U,
+//     LED_BLUE  = 3U,
+//     LED_NAME_MAX
+// } ledname_e;
 
-typedef enum
-{
-    LED_STATE_STEADY = 1U,
-    LED_STATE_BLINK
-} ledStatus_e;
+// typedef enum
+// {
+//     LED_STATE_STEADY = 1U,
+//     LED_STATE_BLINK
+// } ledStatus_e;
 
 /* ============================================================
  * SECTION D: PUBLIC API

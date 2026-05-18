@@ -7,7 +7,18 @@
  *          in the lower-layer modules (modbus_master, modbus_rtu, uart_port).
  *
  *          Slave device map (Two-Wheeler IO Aggregator):
- *            LED Module (OP Card)  →  Slave address LED_MOD_ADD, Channel CH1
+ *            LED Card 1  →  Slave address LED_CARD1_SLAVE_ADDR, Docks 1–3
+ *            LED Card 2  →  Slave address LED_CARD2_SLAVE_ADDR, Docks 4–6
+ *          Both cards reside on the same RS485 bus (CH1).
+ *
+ * CHANGES vs previous revision
+ * ──────────────────────────────
+ * • LED_MOD_ADD renamed to LED_CARD1_SLAVE_ADDR (8U) — unchanged value,
+ *   clearer name.
+ * • Added LED_CARD2_SLAVE_ADDR (9U) for the second LED card.
+ * • Added vLED_ModuleWriteCard() for per-card write control.
+ * • Removed u16GetLocalLedState() stub — now owned by led_manager module.
+ * • All dock-count constants removed from here; live in led_manager.h.
  *
  * @company BACANCY SYSTEMS PVT. LTD.
  *******************************************************************************/
@@ -21,21 +32,31 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "MB_Master_Lib/modbus_master.h"
+#include "led_manager.h"
 
 /* =========================================================================
  * Slave Device Address Map
  * =========================================================================
- * Add additional slave device addresses here as the system grows.
+ * LED cards share the same RS485 bus (CH1) but have distinct slave addresses.
+ * To add a third card: define LED_CARD3_SLAVE_ADDR and extend
+ * vLED_ModuleWriteAllCards() accordingly.
  * ========================================================================= */
 
-/** LED / OP Card module Modbus slave address */
-#define LED_MOD_ADD                     (8U)
+/** LED Card 1 — Modbus slave address (handles Docks 1–3) */
+#define LED_CARD1_SLAVE_ADDR            (0x08U)
+
+/** LED Card 2 — Modbus slave address (handles Docks 4–6) */
+#define LED_CARD2_SLAVE_ADDR            (0x09U)
+
+/* Legacy alias — keep so any existing call site still compiles unchanged */
+#define LED_MOD_ADD                     LED_CARD1_SLAVE_ADDR
 
 /* =========================================================================
  * LED Module Register Map
  * =========================================================================
- * Register addresses are 0-based (Modbus PDU addressing).
- * Physical display address = register address + 1 (for user reference only).
+ * Both cards use the same register layout starting at address 0.
+ * Card 1 register 0 = Dock 1, register 1 = Dock 2, register 2 = Dock 3.
+ * Card 2 register 0 = Dock 4, register 1 = Dock 5, register 2 = Dock 6.
  * ========================================================================= */
 
 /** Firmware version read register start address */
@@ -44,17 +65,19 @@
 /** Number of registers to read for firmware version */
 #define LED_MOD_READ_REG_NO             (2U)
 
-/** LED state write/read register start address */
+/** LED state write/read register start address (same for both cards) */
 #define LED_MOD_WRITE_READ_REG_ADD      (0U)
 
-/** Number of LED state registers to write (one per dock) */
-#define LED_MOD_WRITE_REG_NO            (3U)
+/**
+ * Number of LED state registers per write transaction.
+ * Always equal to LED_CARD_DOCK_CAPACITY (defined in led_manager.h).
+ * Use LED_CARD_DOCK_CAPACITY directly in code; this alias is kept for
+ * backward compatibility with any existing call sites.
+ */
+#define LED_MOD_WRITE_REG_NO            LED_CARD_DOCK_CAPACITY
 
 /* =========================================================================
  * FreeRTOS Task Configuration
- * =========================================================================
- * Both tasks drive the Modbus master state machine and schedule application
- * requests.  Heap depth is in 32-bit words on ARM Cortex-M.
  * ========================================================================= */
 
 #define RS485_TASK_HEAP_DEPTH           (1024U)
@@ -71,57 +94,47 @@
  * ========================================================================= */
 
 /**
- * @brief  Initialise the RS485 application layer and Modbus master stack.
+ * @brief  Initialise the RS485 application layer, LED Manager, and Modbus stack.
  *
- * @details Calls Modbus_Master_Init() for each channel, registers result
- *          callbacks, and creates the FreeRTOS application tasks.
- *          Must be called once from the system startup task before the
- *          scheduler is started (or after, from a higher-priority init task).
- *
- * @return  None
+ * @details Calls LedMgr_Init(), Modbus_Master_Init() for each channel,
+ *          registers result callbacks, and creates the FreeRTOS application task.
+ *          Must be called once from the system startup task.
  */
 void vRS485HandlerInit(void);
 
 /* =========================================================================
  * Public API — LED Module Operations
- * =========================================================================
- * These functions prepare Modbus requests targeting the LED (OP Card) slave.
- * They are non-blocking: they submit a request to the master and return
- * immediately.  The result is delivered via the registered callback.
  * ========================================================================= */
 
 /**
- * @brief  Write current dock LED states to the LED module.
+ * @brief  Write current LED states for ALL docks to their respective LED cards.
  *
- * @details Reads local LED state for all docks via u16GetLocalLedState()
- *          and issues a Write Multiple Registers (FC16) to the LED module.
+ * @details Iterates over every card index (0 … LED_CARD_COUNT-1) and submits
+ *          a Modbus_WriteMultipleRegisters() for each one, but only if:
+ *            (a) the master is idle, AND
+ *            (b) that card has at least one dirty (changed) dock.
  *
- *          Example usage:
- *          @code
- *          vLED_ModuleWrite();   // call periodically from app task
- *          @endcode
- *
- * @return  None
+ *          Non-blocking.  Call periodically from the application task.
  */
-void vLED_ModuleWrite(void);
+void vLED_ModuleWriteAllCards(void);
 
 /**
- * @brief  Read firmware version registers from the LED module.
+ * @brief  Write LED states for one specific card to its slave device.
  *
- * @details Issues a Read Holding Registers (FC03) request.
- *          Result is delivered via the registered Modbus callback.
+ * @details Fetches register values from LedMgr_GetCardRegisters() and
+ *          issues Modbus_WriteMultipleRegisters() to the card's slave address.
  *
- * @return  None
+ * @param[in]  u8CardIndex  LED card index (0-based).
+ */
+void vLED_ModuleWriteCard(uint8_t u8CardIndex);
+
+/**
+ * @brief  Read firmware version registers from LED Card 1.
  */
 void vLED_ModuleReadFWVersion(void);
 
 /**
- * @brief  Read current LED state registers from the LED module.
- *
- * @details Issues a Read Holding Registers (FC03) request for
- *          LED_MOD_WRITE_REG_NO registers starting at LED_MOD_WRITE_READ_REG_ADD.
- *
- * @return  None
+ * @brief  Read current LED state registers from LED Card 1.
  */
 void vLED_ModuleReadState(void);
 
@@ -131,101 +144,9 @@ void vLED_ModuleReadState(void);
 
 /**
  * @brief  Print Modbus master diagnostics for both channels to console.
- *
- * @return  None
  */
 void vRS485_PrintDiagnostics(void);
 
-/* =========================================================================
- * Stub: Local state accessor (implement in LED state manager module)
- * =========================================================================
- * Declared here so AppRS485Handler.c can call it.
- * Implementation lives in the LED / dock state management module.
- * ========================================================================= */
-
-/**
- * @brief  Retrieve the locally-cached LED state for a dock.
- *
- * @param[in]  eDock  Dock identifier (DOCK_1 … DOCK_MAX-1).
- *
- * @return  16-bit LED state register value for the specified dock.
- */
-uint16_t u16GetLocalLedState(uint8_t u8Dock);
-
-
-
-// void RS485_Output_1_Set(void);
-// void RS485_Output_1_Clear(void);
-
-// void RS485_Output_2_Set(void);
-// void RS485_Output_2_Clear(void);
-
-// void RS485_Output_3_Set(void);
-// void RS485_Output_3_Clear(void);
-
-// void RS485_Output_4_Set(void);
-// void RS485_Output_4_Clear(void);
-
-// void RS485_Output_5_Set(void);
-// void RS485_Output_5_Clear(void);
-
-// void RS485_Output_6_Set(void);
-// void RS485_Output_6_Clear(void);
-
-// void RS485_Output_7_Set(void);
-// void RS485_Output_7_Clear(void);
-
-// void RS485_Output_8_Set(void);
-// void RS485_Output_8_Clear(void);
-
-// void RS485_Output_9_Set(void);
-// void RS485_Output_9_Clear(void);
-
-// void RS485_Output_10_Set(void);
-// void RS485_Output_10_Clear(void);
-
-// void RS485_Output_11_Set(void);
-// void RS485_Output_11_Clear(void);
-
-// void RS485_Output_12_Set(void);
-// void RS485_Output_12_Clear(void);
-
-// void RS485_Output_13_Set(void);
-// void RS485_Output_13_Clear(void);
-
-// void RS485_Output_14_Set(void);
-// void RS485_Output_14_Clear(void);
-
-// void RS485_Output_15_Set(void);
-// void RS485_Output_15_Clear(void);
-
-// void RS485_Output_16_Set(void);
-// void RS485_Output_16_Clear(void);
-
-// void RS485_Output_17_Set(void);
-// void RS485_Output_17_Clear(void);
-
-// void RS485_Output_18_Set(void);
-// void RS485_Output_18_Clear(void);
-
-// uint8_t RS485_Output_1_Get(void);
-// uint8_t RS485_Output_2_Get(void);
-// uint8_t RS485_Output_3_Get(void);
-// uint8_t RS485_Output_4_Get(void);
-// uint8_t RS485_Output_5_Get(void);
-// uint8_t RS485_Output_6_Get(void);
-// uint8_t RS485_Output_7_Get(void);
-// uint8_t RS485_Output_8_Get(void);
-// uint8_t RS485_Output_9_Get(void);
-// uint8_t RS485_Output_10_Get(void);
-// uint8_t RS485_Output_11_Get(void);
-// uint8_t RS485_Output_12_Get(void);
-// uint8_t RS485_Output_13_Get(void);
-// uint8_t RS485_Output_14_Get(void);
-// uint8_t RS485_Output_15_Get(void);
-// uint8_t RS485_Output_16_Get(void);
-// uint8_t RS485_Output_17_Get(void);
-// uint8_t RS485_Output_18_Get(void);
 #endif /* APP_RS485_HANDLER_H */
 
 /*******************************************************************************

@@ -69,7 +69,7 @@ static void updateSystemState(uint8_t u8DockNo);
 /******************************************************************************
  * Private Function Prototypes — LED
  ******************************************************************************/
-void vSetLedState(uint8_t u8DockNo, uint8_t ledColor, uint8_t ledState);
+// void vSetLedState(uint8_t u8DockNo, uint8_t ledColor, uint8_t ledState);
 
 /******************************************************************************
  * Private Function Prototypes — Stop & Fault
@@ -1512,7 +1512,7 @@ static void updateSystemState(uint8_t u8DockNo)
         switch (eState)
         {
         case CH_STATE_INIT:
-            vSetLedState(u8DockNo, LED_BLUE, LED_STATE_BLINK);
+            // vSetLedState(u8DockNo, LED_BLUE, LED_STATE_BLINK);
             // SESSION_ResetBMSData(u8DockNo);
             break;
 
@@ -1520,32 +1520,32 @@ static void updateSystemState(uint8_t u8DockNo)
         case CH_STATE_PARAM_VALIDATE:
         case CH_STATE_CONNECTION_CONFIRMED:
         case CH_STATE_INITIALIZE:
-            vSetLedState(u8DockNo, LED_BLUE, LED_STATE_STEADY);
+            // vSetLedState(u8DockNo, LED_BLUE, LED_STATE_STEADY);
             bSessionActive[u8DockNo] = 1U;
             break;
 
         case CH_STATE_PRECHARGE:
-            vSetLedState(u8DockNo, LED_BLUE, LED_STATE_BLINK);
+            // vSetLedState(u8DockNo, LED_BLUE, LED_STATE_BLINK);
             bSessionActive[u8DockNo] = 1U;
             break;
 
         case CH_STATE_CHARGING:
-            vSetLedState(u8DockNo, LED_GREEN, LED_STATE_STEADY);
+            // vSetLedState(u8DockNo, LED_GREEN, LED_STATE_STEADY);
             bSessionActive[u8DockNo] = 1U;
             break;
 
         case CH_STATE_SHUTDOWN:
         case CH_STATE_SESSION_COMPLETE:
-            vSetLedState(u8DockNo, LED_GREEN, LED_STATE_BLINK);
+            // vSetLedState(u8DockNo, LED_GREEN, LED_STATE_BLINK);
             break;
 
         case CH_STATE_ERROR:
-            vSetLedState(u8DockNo, LED_RED, LED_STATE_STEADY);
+            // vSetLedState(u8DockNo, LED_RED, LED_STATE_STEADY);
             break;
 
         default:
             SYS_CONSOLE_PRINT("G%d: Unknown state %d\r\n", (int)u8DockNo, (int)eState);
-            vSetLedState(u8DockNo, LED_RED, LED_STATE_BLINK);
+            // vSetLedState(u8DockNo, LED_RED, LED_STATE_BLINK);
             break;
         }
 
@@ -1592,26 +1592,26 @@ static void CHARGING_TASK(void *pvParameters)
  * SECTION 9: LED CONTROL
  * ============================================================ */
 
-/**
- * @brief  Set LED color and blink/steady state for a dock.
- *
- * @param  u8DockNo  Dock index
- * @param  ledColor  LED_RED, LED_GREEN, or LED_BLUE
- * @param  ledState  LED_STATE_STEADY or LED_STATE_BLINK
- */
-void vSetLedState(uint8_t u8DockNo, uint8_t ledColor, uint8_t ledState)
-{
-    /* TODO: Connect to hardware LED driver */
-    (void)u8DockNo;
-    switch (ledColor)
-    {
-    case LED_RED:   /* TODO: set red LED */   break;
-    case LED_GREEN: /* TODO: set green LED */ break;
-    case LED_BLUE:  /* TODO: set blue LED */  break;
-    default:                                  break;
-    }
-    (void)ledState;
-}
+// /**
+//  * @brief  Set LED color and blink/steady state for a dock.
+//  *
+//  * @param  u8DockNo  Dock index
+//  * @param  ledColor  LED_RED, LED_GREEN, or LED_BLUE
+//  * @param  ledState  LED_STATE_STEADY or LED_STATE_BLINK
+//  */
+// void vSetLedState(uint8_t u8DockNo, uint8_t ledColor, uint8_t ledState)
+// {
+//     /* TODO: Connect to hardware LED driver */
+//     (void)u8DockNo;
+//     switch (ledColor)
+//     {
+//     case LED_RED:   /* TODO: set red LED */   break;
+//     case LED_GREEN: /* TODO: set green LED */ break;
+//     case LED_BLUE:  /* TODO: set blue LED */  break;
+//     default:                                  break;
+//     }
+//     (void)ledState;
+// }
 
 
 /* ============================================================

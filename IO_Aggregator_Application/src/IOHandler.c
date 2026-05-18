@@ -126,7 +126,7 @@
 #include <math.h>
 #include <string.h>
 #include "sessionDBHandler.h"
-
+#include "led_manager.h"
 /* ============================================================================
  * Internal Configuration
  * ========================================================================== */
@@ -361,7 +361,7 @@ static void     prv_SendResponsePayload(const uint8_t *pu8Payload, uint8_t u8Len
 static void     prv_PrepareDispatchOutbPacket(void);
 static void     prv_ResetFrameState(void);
 static uint8_t  prv_GPIO_Read(uint16_t u16PortNo, uint8_t *pu8ErrorCode);
-static void     prv_GPIO_Write(uint16_t u16PortNo, bool bVal, uint8_t *pu8ErrorCode);
+static void     prv_GPIO_Write(uint16_t u16PortNo, uint8_t u8Val, uint8_t *pu8ErrorCode);
 static uint8_t  prv_ChargingControl(uint8_t u8DockNo, uint8_t u8Action);
 static uint32_t prv_AnalogInputGet(uint8_t u8Channel);
 static void     prv_vConfigureIOexpanders(void);
@@ -1282,7 +1282,7 @@ static uint8_t prv_GPIO_Read(uint16_t u16PortNo, uint8_t *pu8ErrorCode)
  * @param  bVal         true = set, false = clear
  * @param  pu8ErrorCode Output error code
  */
-static void prv_GPIO_Write(uint16_t u16PortNo, bool bVal, uint8_t *pu8ErrorCode)
+static void prv_GPIO_Write(uint16_t u16PortNo, uint8_t u8Val, uint8_t *pu8ErrorCode)
 {
     if (pu8ErrorCode == NULL) { return; }
     if ((u16PortNo < 61U) || (u16PortNo > 108U))
@@ -1301,55 +1301,55 @@ static void prv_GPIO_Write(uint16_t u16PortNo, bool bVal, uint8_t *pu8ErrorCode)
     // }
     switch (u16PortNo)
     {
-        case 61U: bVal ? Digital_Output_1_Set()  : Digital_Output_1_Clear();  break;
-        case 62U: bVal ? Digital_Output_2_Set()  : Digital_Output_2_Clear();  break;
-        case 63U: bVal ? Digital_Output_3_Set()  : Digital_Output_3_Clear();  break;
-        case 64U: bVal ? Digital_Output_4_Set()  : Digital_Output_4_Clear();  break;
-        case 65U: bVal ? Digital_Output_5_Set()  : Digital_Output_5_Clear();  break;
-        case 66U: bVal ? Digital_Output_6_Set()  : Digital_Output_6_Clear();  break;
-        case 67U: bVal ? Digital_Output_7_Set()  : Digital_Output_7_Clear();  break;
-        case 68U: bVal ? Digital_Output_8_Set()  : Digital_Output_8_Clear();  break;
-        case 69U: bVal ? Digital_Output_9_Set()  : Digital_Output_9_Clear();  break;
-        case 70U: bVal ? Digital_Output_10_Set() : Digital_Output_10_Clear(); break;
-        case 71U: bVal ? Digital_Output_11_Set() : Digital_Output_11_Clear(); break;
-        case 72U: bVal ? Digital_Output_12_Set() : Digital_Output_12_Clear(); break;
-        case 73U: bVal ? Digital_Output_13_Set() : Digital_Output_13_Clear(); break;
-        case 74U: bVal ? Digital_Output_14_Set() : Digital_Output_14_Clear(); break;
-        case 75U: bVal ? Digital_Output_15_Set() : Digital_Output_15_Clear(); break;
-        case 76U: bVal ? Digital_Output_16_Set() : Digital_Output_16_Clear(); break;
-        case 77U: bVal ? Digital_Output_17_Set() : Digital_Output_17_Clear(); break;
-        case 78U: bVal ? Digital_Output_18_Set() : Digital_Output_18_Clear(); break;
-        case 79U: bVal ? Digital_Output_19_Set() : Digital_Output_19_Clear(); break;
-        case 80U: bVal ? Digital_Output_20_Set() : Digital_Output_20_Clear(); break;
-        case 81U: bVal ? Digital_Output_21_Set() : Digital_Output_21_Clear(); break;
-        case 82U: bVal ? Digital_Output_22_Set() : Digital_Output_22_Clear(); break;
-        case 83U: bVal ? Digital_Output_23_Set() : Digital_Output_23_Clear(); break;
-        case 84U: bVal ? Digital_Output_24_Set() : Digital_Output_24_Clear(); break;
-        case 85U: bVal ? efuse1_in_Set()       : efuse1_in_Clear();       break;
-        case 86U: bVal ? efuse2_in_Set()       : efuse2_in_Clear();       break;
-        case 87U: bVal ? efuse3_in_Set()       : efuse3_in_Clear();       break;
-        case 88U: bVal ? efuse4_in_Set()       : efuse4_in_Clear();       break;
-        case 89U: bVal ? Relay_Output_1_Set()  : Relay_Output_1_Clear();  break;
-        case 90U: bVal ? Relay_Output_2_Set()  : Relay_Output_2_Clear();  break;
+        case 61U: u8Val ? Digital_Output_1_Set()  : Digital_Output_1_Clear();  break;
+        case 62U: u8Val ? Digital_Output_2_Set()  : Digital_Output_2_Clear();  break;
+        case 63U: u8Val ? Digital_Output_3_Set()  : Digital_Output_3_Clear();  break;
+        case 64U: u8Val ? Digital_Output_4_Set()  : Digital_Output_4_Clear();  break;
+        case 65U: u8Val ? Digital_Output_5_Set()  : Digital_Output_5_Clear();  break;
+        case 66U: u8Val ? Digital_Output_6_Set()  : Digital_Output_6_Clear();  break;
+        case 67U: u8Val ? Digital_Output_7_Set()  : Digital_Output_7_Clear();  break;
+        case 68U: u8Val ? Digital_Output_8_Set()  : Digital_Output_8_Clear();  break;
+        case 69U: u8Val ? Digital_Output_9_Set()  : Digital_Output_9_Clear();  break;
+        case 70U: u8Val ? Digital_Output_10_Set() : Digital_Output_10_Clear(); break;
+        case 71U: u8Val ? Digital_Output_11_Set() : Digital_Output_11_Clear(); break;
+        case 72U: u8Val ? Digital_Output_12_Set() : Digital_Output_12_Clear(); break;
+        case 73U: u8Val ? Digital_Output_13_Set() : Digital_Output_13_Clear(); break;
+        case 74U: u8Val ? Digital_Output_14_Set() : Digital_Output_14_Clear(); break;
+        case 75U: u8Val ? Digital_Output_15_Set() : Digital_Output_15_Clear(); break;
+        case 76U: u8Val ? Digital_Output_16_Set() : Digital_Output_16_Clear(); break;
+        case 77U: u8Val ? Digital_Output_17_Set() : Digital_Output_17_Clear(); break;
+        case 78U: u8Val ? Digital_Output_18_Set() : Digital_Output_18_Clear(); break;
+        case 79U: u8Val ? Digital_Output_19_Set() : Digital_Output_19_Clear(); break;
+        case 80U: u8Val ? Digital_Output_20_Set() : Digital_Output_20_Clear(); break;
+        case 81U: u8Val ? Digital_Output_21_Set() : Digital_Output_21_Clear(); break;
+        case 82U: u8Val ? Digital_Output_22_Set() : Digital_Output_22_Clear(); break;
+        case 83U: u8Val ? Digital_Output_23_Set() : Digital_Output_23_Clear(); break;
+        case 84U: u8Val ? Digital_Output_24_Set() : Digital_Output_24_Clear(); break;
+        case 85U: u8Val ? efuse1_in_Set()       : efuse1_in_Clear();       break;
+        case 86U: u8Val ? efuse2_in_Set()       : efuse2_in_Clear();       break;
+        case 87U: u8Val ? efuse3_in_Set()       : efuse3_in_Clear();       break;
+        case 88U: u8Val ? efuse4_in_Set()       : efuse4_in_Clear();       break;
+        case 89U: u8Val ? Relay_Output_1_Set()  : Relay_Output_1_Clear();  break;
+        case 90U: u8Val ? Relay_Output_2_Set()  : Relay_Output_2_Clear();  break;
         /* RS485 Outputs card-1(91-99) card-2(100-108) */
-        // case 91U: bVal ? RS485_Output_1_Set()  : RS485_Output_1_Clear();  break;
-        // case 92U: bVal ? RS485_Output_2_Set()  : RS485_Output_2_Clear() ;  break;
-        // case 93U: bVal ? RS485_Output_3_Set()  : RS485_Output_3_Clear() ;  break;
-        // case 94U: bVal ? RS485_Output_4_Set()  : RS485_Output_4_Clear() ;  break;
-        // case 95U: bVal ? RS485_Output_5_Set()  : RS485_Output_5_Clear() ;  break;
-        // case 96U: bVal ? RS485_Output_6_Set()  : RS485_Output_6_Clear() ;  break;
-        // case 97U: bVal ? RS485_Output_7_Set()  : RS485_Output_7_Clear() ;  break;
-        // case 98U: bVal ? RS485_Output_8_Set()  : RS485_Output_8_Clear() ;  break;
-        // case 99U: bVal ? RS485_Output_9_Set()  : RS485_Output_9_Clear() ;  break;
-        // case 100U: bVal ? RS485_Output_10_Set()  : RS485_Output_10_Clear() ;  break;
-        // case 101U: bVal ? RS485_Output_11_Set()  : RS485_Output_11_Clear() ;  break;
-        // case 102U: bVal ? RS485_Output_12_Set()  : RS485_Output_12_Clear() ;  break;
-        // case 103U: bVal ? RS485_Output_13_Set()  : RS485_Output_13_Clear() ;  break;
-        // case 104U: bVal ? RS485_Output_14_Set()  : RS485_Output_14_Clear() ;  break;
-        // case 105U: bVal ? RS485_Output_15_Set()  : RS485_Output_15_Clear() ;  break;
-        // case 106U: bVal ? RS485_Output_16_Set()  : RS485_Output_16_Clear() ;  break;
-        // case 107U: bVal ? RS485_Output_17_Set()  : RS485_Output_17_Clear() ;  break;
-        // case 108U: bVal ? RS485_Output_18_Set()  : RS485_Output_18_Clear() ;  break;
+        case 91U: RS485_Output_1_Set(u8Val); break;
+        case 92U: RS485_Output_2_Set(u8Val); break;
+        case 93U: RS485_Output_3_Set(u8Val); break;
+        case 94U: RS485_Output_4_Set(u8Val); break;
+        case 95U: RS485_Output_5_Set(u8Val); break;
+        case 96U: RS485_Output_6_Set(u8Val); break;
+        case 97U: RS485_Output_7_Set(u8Val); break;
+        case 98U: RS485_Output_8_Set(u8Val); break;
+        case 99U: RS485_Output_9_Set(u8Val); break;
+        case 100U: RS485_Output_10_Set(u8Val); break;
+        case 101U: RS485_Output_11_Set(u8Val); break;
+        case 102U: RS485_Output_12_Set(u8Val); break;
+        case 103U: RS485_Output_13_Set(u8Val); break;
+        case 104U: RS485_Output_14_Set(u8Val); break;
+        case 105U: RS485_Output_15_Set(u8Val); break;
+        case 106U: RS485_Output_16_Set(u8Val); break;
+        case 107U: RS485_Output_17_Set(u8Val); break;
+        case 108U: RS485_Output_18_Set(u8Val); break;
         default:  *pu8ErrorCode = k_ErrInvalidPort; break;
     }
 }
@@ -1377,8 +1377,8 @@ bool bGPIO_Operation(GPIOOperation_e eGPIOType, uint8_t u8DockNo, GPIO_Direction
 {
     uint8_t u8Err = k_ErrNone;
     uint16_t u16PinNo = 0U;
-    bool bWriteVal = false;
-    bool bIsInputOp = false;
+    uint8_t u8WriteVal = 0U;
+    uint8_t u8IsInputOp = 0U;
 
     /* Per-dock operations need a valid dock index */
     bool bPerDockOp = (eGPIOType != DO_COMPARTMENT_FAN_HIGH) &&
@@ -1398,83 +1398,83 @@ bool bGPIO_Operation(GPIOOperation_e eGPIOType, uint8_t u8DockNo, GPIO_Direction
     {
         case DO_AC_RELAY_ON:
             u16PinNo = k_GpioConf.AC_Relay_Pin[u8DockNo];
-            bWriteVal = true;
+            u8WriteVal = 1U;
             break;
         case DO_AC_RELAY_OFF:
             u16PinNo = k_GpioConf.AC_Relay_Pin[u8DockNo];
-            bWriteVal = false;
+            u8WriteVal = 0U;
             break;
         case DO_DC_RELAY_ON:
             u16PinNo = k_GpioConf.DC_Relay_Pin[u8DockNo];
-            bWriteVal = true;
+            u8WriteVal = 1U;
             break;
         case DO_DC_RELAY_OFF:
             u16PinNo = k_GpioConf.DC_Relay_Pin[u8DockNo];
-            bWriteVal = false;
+            u8WriteVal = 0U;
             break;
         case DO_SOLENOID_HIGH:
             u16PinNo = k_GpioConf.Solenoid_PinHi[u8DockNo];
-            bWriteVal = true; /* Pulse high */
+            u8WriteVal = 1U; /* Pulse high */
             break;
         case DO_SOLENOID_LOW:
             u16PinNo = k_GpioConf.Solenoid_PinLo[u8DockNo];
-            bWriteVal = true; /* Pulse low */
+            u8WriteVal = 0U; /* Pulse low */
             break;
         case DO_R_LED_HIGH:
             u16PinNo = k_GpioConf.R_LED_Pin[u8DockNo];
-            bWriteVal = true;
+            u8WriteVal = 1U;
             break;
         case DO_R_LED_LOW:
             u16PinNo = k_GpioConf.R_LED_Pin[u8DockNo];
-            bWriteVal = false;
+            u8WriteVal = 0U;
             break;
         case DO_G_LED_HIGH:
             u16PinNo = k_GpioConf.G_LED_Pin[u8DockNo];
-            bWriteVal = true;
+            u8WriteVal = 1U;
             break;
         case DO_G_LED_LOW:
             u16PinNo = k_GpioConf.G_LED_Pin[u8DockNo];
-            bWriteVal = false;
+            u8WriteVal = 0U;
             break;
         case DO_B_LED_HIGH:
             u16PinNo = k_GpioConf.B_LED_Pin[u8DockNo];
-            bWriteVal = true;
+            u8WriteVal = 1U;
             break;
         case DO_B_LED_LOW:
             u16PinNo = k_GpioConf.B_LED_Pin[u8DockNo];
-            bWriteVal = false;
+            u8WriteVal = 0U;
             break;
         case DO_DOCK_FAN_HIGH:
             u16PinNo = k_GpioConf.Dock_Fan_Pin[u8DockNo];
-            bWriteVal = true;
+            u8WriteVal = 1U;
             break;
         case DO_DOCK_FAN_LOW:
             u16PinNo = k_GpioConf.Dock_Fan_Pin[u8DockNo];
-            bWriteVal = false;
+            u8WriteVal = 0U;
             break;
         case DO_COMPARTMENT_FAN_HIGH:
             u16PinNo = k_GpioConf.Compartment_Fan_Pin;
-            bWriteVal = true;
+            u8WriteVal = 1U;
             break;
         case DO_COMPARTMENT_FAN_LOW:
             u16PinNo = k_GpioConf.Compartment_Fan_Pin;
-            bWriteVal = false;
+            u8WriteVal = 0U;
             break;
         case DI_E_STOP_STATUS:
             u16PinNo = k_GpioConf.EStop_Pin;
-            bIsInputOp = true;
+            u8IsInputOp = 1U;
             break;
         case DI_DOOR_LOCK_STATUS:
             u16PinNo = k_GpioConf.DoorLock_Pin[u8DockNo];
-            bIsInputOp = true;
+            u8IsInputOp = 1U;
             break;
         case DI_SOLENOID_LOCK_STATUS:
             u16PinNo = k_GpioConf.SolenoidLock_Pin[u8DockNo];
-            bIsInputOp = true;
+            u8IsInputOp = 1U;
             break;
         case DI_BP_STATUS:
             u16PinNo = k_GpioConf.IgnitionSence_Pin[u8DockNo];
-            bIsInputOp = true;
+            u8IsInputOp = 1U;
             break;
         default:
             SYS_CONSOLE_PRINT("[GPIO] Unknown operation %u\r\n", (unsigned)eGPIOType);
@@ -1494,7 +1494,7 @@ bool bGPIO_Operation(GPIOOperation_e eGPIOType, uint8_t u8DockNo, GPIO_Direction
     else
     {
         /* Write operation: only allowed for output pins */
-        if (bIsInputOp)
+        if (u8IsInputOp)
         {
             SYS_CONSOLE_PRINT("[GPIO] Write not allowed on input pin for op %u\r\n", (unsigned)eGPIOType);
             return false;
@@ -1504,13 +1504,13 @@ bool bGPIO_Operation(GPIOOperation_e eGPIOType, uint8_t u8DockNo, GPIO_Direction
         if ((eGPIOType == DO_SOLENOID_HIGH) || (eGPIOType == DO_SOLENOID_LOW))
         {
             /* Special pulse for solenoid */
-            prv_GPIO_Write(u16PinNo, bWriteVal, &u8Err);
+            prv_GPIO_Write(u16PinNo, u8WriteVal, &u8Err);
             vTaskDelay(pdMS_TO_TICKS(SOLENOID_PULSE_MS));
-            prv_GPIO_Write(u16PinNo, false, &u8Err); /* Clear after pulse */
+            prv_GPIO_Write(u16PinNo, 0U, &u8Err); /* Clear after pulse */
         }
         else
         {
-            prv_GPIO_Write(u16PinNo, bWriteVal, &u8Err);
+            prv_GPIO_Write(u16PinNo, u8WriteVal, &u8Err);
         }
         return (u8Err == k_ErrNone);
     }
@@ -1736,7 +1736,18 @@ static void prv_HandleGPIOCommand(void)
     if (u8MsgType == k_MsgDigitalWrite)
     {
         u8PortVal = s_reqFrame.payload[3];
-        if ((u8PortVal != 0U) && (u8PortVal != 1U))
+        if (u16PortNo >= 91U && u16PortNo <= 108U)
+        {
+            /* RS485 outputs allow values 0–3 (00=off, 01=LED_STATE_STEADY, 02=LED_STATE_SLOW_BLINK, 
+            03=LED_STATE_MEDIUM_BLINK & 04=LED_STATE_FAST_BLINK) */
+            if ((u8PortVal != 0U) && (u8PortVal != 1U) && (u8PortVal != 2U) && (u8PortVal != 3U) && (u8PortVal != 4U) && (u8PortVal != 5U))
+            {
+                SYS_CONSOLE_PRINT("[GPIO] Invalid value %u for RS485 port %u\r\n",
+                                  (unsigned)u8PortVal, (unsigned)u16PortNo);
+                u8ErrorCode = k_ErrInvalidValue;
+            }
+        }
+        else if ((u8PortVal != 0U) && (u8PortVal != 1U))
         {
             SYS_CONSOLE_PRINT("[GPIO] Invalid value %u\r\n", (unsigned)u8PortVal);
             u8ErrorCode = k_ErrInvalidValue;
@@ -1751,7 +1762,7 @@ static void prv_HandleGPIOCommand(void)
         }
         else
         {
-            prv_GPIO_Write(u16PortNo, (bool)(u8PortVal != 0U), &u8ErrorCode);
+            prv_GPIO_Write(u16PortNo, u8PortVal, &u8ErrorCode);
         }
         // prv_StoreRelay_DigitalOutputsFrame();
     }

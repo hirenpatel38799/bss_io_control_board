@@ -336,7 +336,7 @@ void Modbus_Master_Process(ModbusMaster_Channel_t *pxMaster)
 
             if (bFrameReady)
             {
-                SYS_CONSOLE_PRINT("[ModbusMaster CH%u] Frame ready, %u bytes:",
+                SYS_CONSOLE_PRINT("[ModbusMaster CH%u]RX bytes: %u:",
                                    (unsigned)pxMaster->eChannel,
                                    (unsigned)pxMaster->xRxCtx.u16Count);
                 {
@@ -390,6 +390,17 @@ void Modbus_Master_Process(ModbusMaster_Channel_t *pxMaster)
             {
                 pxMaster->eState = MB_MASTER_STATE_COMPLETE;
                 prv_CompleteTransaction(pxMaster, MB_RESULT_SUCCESS, &xResp);
+
+                /* Mark LED card as clean after successful state sync */
+                // uint8_t u8CardIdx = (uint8_t)pxMaster->eChannel;
+                // if (u8CardIdx < (uint8_t)LED_CARD_COUNT)
+                // {
+                //     LedMgr_MarkCardClean(u8CardIdx);
+                //     SYS_CONSOLE_PRINT(
+                //         "[App RS485 CH%u] LED Card %u write ack state synced\r\n",
+                //         (unsigned)pxMaster->eChannel,
+                //         (unsigned)(u8CardIdx + 1U));
+                // }
                 break;
             }
 
