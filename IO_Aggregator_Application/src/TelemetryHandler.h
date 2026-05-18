@@ -178,15 +178,13 @@ typedef struct __attribute__((packed))
 {
     TELEMETRY_PMData_t   pmData;     /**< Power module data                  */
     TELEMETRY_BMSData_t  bmsData;    /**< BMS data                           */
-    TELEMETRY_TempData_t tempData;   /**< Temperature data                   */
 } TELEMETRY_Data_t;
-
 /* ============================================================================
  * Global Telemetry Data Array
  * BUG FIX: was [4] — now uses MAX_DOCKS to stay in sync with sessionDBHandler.h
  * ========================================================================== */
 extern TELEMETRY_Data_t telemetryData[MAX_DOCKS];
-
+extern TELEMETRY_TempData_t tempData;   /**< Temperature data                   */
 /* ============================================================================
  * Function Prototypes
  * ========================================================================== */

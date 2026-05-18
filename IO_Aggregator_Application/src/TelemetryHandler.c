@@ -84,7 +84,7 @@
  * BUG FIX: was [4] — now MAX_DOCKS to match sessionDBHandler.h
  * ========================================================================== */
 TELEMETRY_Data_t telemetryData[MAX_DOCKS];
-
+TELEMETRY_TempData_t tempData;
 /* ============================================================================
  * Private Variables
  * ========================================================================== */
@@ -239,10 +239,10 @@ static void prv_UpdateFromSession(uint8_t u8DockId)
     
     /* ------- Temperature Data ------- */
     /* COMPARTMENT (index 0) holds the enclosure sensor */
-    telemetryData[u8DockId].tempData.u8CompartmentTemperature =
+    tempData.u8CompartmentTemperature =
         SESSION_GetDockTemperature((uint8_t)COMPARTMENT);
 
-    telemetryData[u8DockId].tempData.u8DockTemperature[u8DockId] =
+    tempData.u8DockTemperature[u8DockId] =
         SESSION_GetDockTemperature((uint8_t)u8DockId);
 }
 
@@ -417,10 +417,10 @@ static void prv_SendTemperature(uint8_t u8CompartmentId)
     uint8_t au8Payload[TELEMETRY_TEMP_PAYLOAD_SIZE];
     uint8_t u8TemperatureTelemetrySize = SESSION_GetMaxDocks() + 1U; /* +1 for compartment sensor */
     /* Read directly from session DB — always fresh */
-    au8Payload[0] = SESSION_GetDockTemperature((uint8_t)COMPARTMENT);
+    au8Payload[0] = tempData.u8CompartmentTemperature;
     for (uint8_t u8DockNo = DOCK_1; u8DockNo <= SESSION_GetMaxDocks(); u8DockNo++)
     {
-        au8Payload[u8DockNo] = SESSION_GetDockTemperature(u8DockNo);
+        au8Payload[u8DockNo] = tempData.u8DockTemperature[u8DockNo];
     }
 
     /* Dock ID = 0x00 indicates a broadcast (not dock-specific) */

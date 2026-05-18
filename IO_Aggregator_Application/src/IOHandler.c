@@ -858,7 +858,7 @@ void ReadAllAnalogInputPins(void)
     static uint8_t logCounter = 0;
     logCounter++;
 
-    if (logCounter >= 1000)
+    if (logCounter >= 100)
     {
         static const ADC_CORE_NUM k_AdcCores[ALL_ANALOG_PINS] = {
             ADC_CORE_NUM2, ADC_CORE_NUM2, ADC_CORE_NUM0, ADC_CORE_NUM0,

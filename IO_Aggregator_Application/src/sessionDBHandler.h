@@ -257,6 +257,7 @@ typedef struct
     /* Device connectivity */
     uint8_t          u8BMSRxStatus;           /**< BMS CAN RX active (0/1)  ← FIXED typo */
     uint8_t          u8PMRxStatus;            /**< PM CAN RX active (0/1)            */
+    bool             bLEDCardStatus;          /**< LED card connectivity status (0/1) */
 
     /* Temperatures */
     uint8_t          u8DockTemperature;       /**< Dock housing temperature (°C)     */
@@ -336,6 +337,8 @@ extern SESSION_Data_t sessionDB[MAX_DOCKS];
 #define SESSION_SetPMRxStatus(idx, val)         (sessionDB[(idx)].u8PMRxStatus = (val))
 #define SESSION_GetPMRxStatus(idx)              (sessionDB[(idx)].u8PMRxStatus)
 
+#define SESSION_SetLEDCardStatus(val)      (sessionDB[(COMPARTMENT)].bLEDCardStatus = (val))
+#define SESSION_GetLEDCardStatus()           (sessionDB[(COMPARTMENT)].bLEDCardStatus)
 /* --- Temperatures --- */
 #define SESSION_SetDockTemperature(idx, val)    (sessionDB[(idx)].u8DockTemperature = (val))
 #define SESSION_GetDockTemperature(idx)         (sessionDB[(idx)].u8DockTemperature)

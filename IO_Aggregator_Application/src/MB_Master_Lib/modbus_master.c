@@ -170,11 +170,11 @@ static bool prv_RetryOrFail(ModbusMaster_Channel_t *pxMaster,
     {
         pxMaster->xTx.u8RetryCount++;
 
-        SYS_CONSOLE_PRINT("[ModbusMaster CH%u] Retry %u/%u after: %u\r\n",
-                           (unsigned)pxMaster->eChannel,
-                           (unsigned)pxMaster->xTx.u8RetryCount,
-                           (unsigned)MODBUS_MASTER_MAX_RETRIES,
-                           (unsigned)eErrorResult);
+        // SYS_CONSOLE_PRINT("[ModbusMaster CH%u] Retry %u/%u after: %u\r\n",
+        //                    (unsigned)pxMaster->eChannel,
+        //                    (unsigned)pxMaster->xTx.u8RetryCount,
+        //                    (unsigned)MODBUS_MASTER_MAX_RETRIES,
+        //                    (unsigned)eErrorResult);
 
         /*
          * IMPORTANT: RxCtx is reset at the TOP of the SENDING state (below),
@@ -188,7 +188,7 @@ static bool prv_RetryOrFail(ModbusMaster_Channel_t *pxMaster,
     /* Retries exhausted */
     SYS_CONSOLE_PRINT("[ModbusMaster CH%u] All retries exhausted, err=%u\r\n",
                        (unsigned)pxMaster->eChannel, (unsigned)eErrorResult);
-
+    SESSION_SetLEDCardStatus(false); /* BUG FIX: mark LED card disconnected on master comms failure */
     pxMaster->eState = MB_MASTER_STATE_ERROR;
     prv_CompleteTransaction(pxMaster, eErrorResult, NULL);
     return false;
@@ -301,7 +301,7 @@ void Modbus_Master_Process(ModbusMaster_Channel_t *pxMaster)
                                (unsigned)pxMaster->xTx.u8RetryCount);*/
 
             /* Log the raw request bytes for debug */
-            {
+           /* {
                 uint16_t u16i;
                 SYS_CONSOLE_PRINT("[ModbusMaster CH%u] TX bytes:", (unsigned)pxMaster->eChannel);
                 for (u16i = 0U; u16i < pxMaster->xTx.xRequest.u16Length; u16i++)
@@ -309,7 +309,7 @@ void Modbus_Master_Process(ModbusMaster_Channel_t *pxMaster)
                     SYS_CONSOLE_PRINT(" %02X", pxMaster->xTx.xRequest.au8Frame[u16i]);
                 }
                 SYS_CONSOLE_PRINT("\r\n");
-            }
+            }*/
 
             ePortStatus = UartPort_Transmit(pxMaster->eChannel,
                                              pxMaster->xTx.xRequest.au8Frame,
@@ -336,7 +336,7 @@ void Modbus_Master_Process(ModbusMaster_Channel_t *pxMaster)
 
             if (bFrameReady)
             {
-                SYS_CONSOLE_PRINT("[ModbusMaster CH%u]RX bytes: %u:",
+                /*SYS_CONSOLE_PRINT("[ModbusMaster CH%u]RX bytes: %u:",
                                    (unsigned)pxMaster->eChannel,
                                    (unsigned)pxMaster->xRxCtx.u16Count);
                 {
@@ -346,7 +346,7 @@ void Modbus_Master_Process(ModbusMaster_Channel_t *pxMaster)
                         SYS_CONSOLE_PRINT(" %02X", pxMaster->xRxCtx.au8Buffer[u16i]);
                     }
                     SYS_CONSOLE_PRINT("\r\n");
-                }
+                }*/
 
                 pxMaster->eState = MB_MASTER_STATE_PROCESSING;
                 /* Fall through to PROCESSING on the next call */
@@ -356,9 +356,9 @@ void Modbus_Master_Process(ModbusMaster_Channel_t *pxMaster)
             if (prv_ElapsedMs(pxMaster->xTx.u32TimeoutStart,
                                (uint32_t)MODBUS_MASTER_RESPONSE_TIMEOUT_MS))
             {
-                SYS_CONSOLE_PRINT("[ModbusMaster CH%u] Timeout. Bytes so far: %u\r\n",
+                /*SYS_CONSOLE_PRINT("[ModbusMaster CH%u] Timeout. Bytes so far: %u\r\n",
                                    (unsigned)pxMaster->eChannel,
-                                   (unsigned)pxMaster->xRxCtx.u16Count);
+                                   (unsigned)pxMaster->xRxCtx.u16Count);*/
 
                 pxMaster->xDiag.u32ErrTimeout++;
                 (void)prv_RetryOrFail(pxMaster, MB_RESULT_ERR_TIMEOUT);
@@ -390,7 +390,7 @@ void Modbus_Master_Process(ModbusMaster_Channel_t *pxMaster)
             {
                 pxMaster->eState = MB_MASTER_STATE_COMPLETE;
                 prv_CompleteTransaction(pxMaster, MB_RESULT_SUCCESS, &xResp);
-
+                SESSION_SetLEDCardStatus(true); /* Mark LED card connected on successful transaction */
                 /* Mark LED card as clean after successful state sync */
                 // uint8_t u8CardIdx = (uint8_t)pxMaster->eChannel;
                 // if (u8CardIdx < (uint8_t)LED_CARD_COUNT)

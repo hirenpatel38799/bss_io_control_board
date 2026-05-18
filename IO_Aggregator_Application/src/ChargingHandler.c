@@ -1652,6 +1652,7 @@ static void vPrintStateAndDeviceInfo(uint8_t u8DockNo)
         "Auth Cmd       : %lu\r\n"
         "BMS Status     : %s\r\n"
         "PM Status      : %s\r\n"
+        "LED Card Status: %s\r\n"
         "System Fault   : 0x%08lX\r\n"
         "BMS Fault      : 0x%08lX\r\n"
         "PM Fault       : 0x%08lX\r\n"
@@ -1661,6 +1662,7 @@ static void vPrintStateAndDeviceInfo(uint8_t u8DockNo)
         SESSION_GetAuthenticationCommand(u8DockNo),
         SESSION_GetBMSRxStatus(u8DockNo) ? "Connected" : "Disconnected",
         SESSION_GetPMRxStatus(u8DockNo)  ? "Connected" : "Disconnected",
+        SESSION_GetLEDCardStatus() ? "Connected" : "Disconnected",
         SESSION_GetSystemFaultBitmap(u8DockNo),
         SESSION_GetBMSFaultBitmap(u8DockNo),
         SESSION_GetPMFaultBitmap(u8DockNo)
