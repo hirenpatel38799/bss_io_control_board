@@ -610,9 +610,8 @@ void vSendCanTxMsgToQueue(const CAN_TX_BUFFER *const pCanTxBuffer,
                           (unsigned)(DOCK_1 + s_u8ActiveChannels - 1U));
         return;
     }
-
     /* Arithmetic dock → channel mapping */
-    uint8_t u8Channel = (uint8_t)(u8DockNo - (uint8_t)DOCK_1);
+    const uint8_t u8Channel = (uint8_t)(u8DockNo - (uint8_t)DOCK_1);
 
     QueueHandle_t xQueue = xCANTXQueueHandler[u8Channel];
     if (xQueue == NULL)
@@ -758,7 +757,7 @@ static void prv_RxHandlerTask_Generic(void *pvParameters)
  */
 static void prv_ServerTask_Generic(void *pvParameters)
 {
-    uint8_t u8Channel = (uint8_t)(uintptr_t)pvParameters;
+    const uint8_t u8Channel = (uint8_t)(uintptr_t)pvParameters;
 
     if (u8Channel >= s_u8ActiveChannels)
     {
@@ -789,14 +788,20 @@ static void prv_ServerTask_Generic(void *pvParameters)
     while (true)
     {
         /* ---- TX phase: drain entire SW TX queue ---- */
-        while (xQueueReceive(xTxQueue, &tx, 0U) == pdPASS)
+        while (xQueueReceive(xTxQueue, &tx, 10U) == pdPASS)
         {
+            // if (u8Channel == (uint8_t)CANBUS_0)
+            // {
+            //     SYS_CONSOLE_PRINT("[TxQueue] Channel %u -> pCanTxBuffer ID=0x%08lX\r\n",
+            //                       (unsigned)u8Channel, (unsigned long)tx.id);
+            // }
             if (!CAN_WriteStruct(u8Channel, &tx))
             {
                 SYS_CONSOLE_PRINT("[%s SRV] TX failed ID=0x%08lX\r\n",
                                   s_canHwOps[u8Channel].pcName,
                                   (unsigned long)tx.id);
             }
+            vTaskDelay(pdMS_TO_TICKS(1U));
         }
 
         /* ---- RX phase: drain entire SW RX queue ---- */
