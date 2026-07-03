@@ -895,6 +895,7 @@ void ReadAllAnalogInputPins(void)
         {
             au32AdcData[i] = ADC_ResultGet(k_AdcCores[i], k_AdcChannels[i]);
             uint16_t u16Avg = MovingAverage_Update(i, (uint16_t)au32AdcData[i]);
+            uint16_t u16Vol = (uint16_t)au32AdcData[i] * k_Vref / 4095U;
 
 #if PT100_Sensor
             float fVoltage = (float)u16Avg * k_Vref * k_InvAdcMax;
@@ -902,23 +903,43 @@ void ReadAllAnalogInputPins(void)
             float fVoltage = (float)u16Avg * ADC_VREF * k_InvAdcMax;
 #endif
 
-            if (i < (uint8_t)NUM_TEMPERATURE_ANALOG_PINS)
+           if (i < (uint8_t)NUM_TEMPERATURE_ANALOG_PINS)
             {
-                float fTemp;
-#if defined(PT100_Sensor) && (PT100_Sensor == 1)
-                fTemp = prv_TempCalcPT100(fVoltage);
-#elif defined(NTC_Sensor) && (NTC_Sensor == 1)
-                fTemp = prv_TempCalcNTC(fVoltage);
-#else
-                fTemp = (float)u16Avg;
-#endif
-                /* Store as fixed-point (0.01 °C units) */
-                float fFixed = fTemp * 100.0F;
-                if (fFixed < 0.0F)
+                uint16_t u16FixedResult = 0U; /* declare at outer scope */
+
+                if ((i != 12U) && (i != 13U) && (i != 14U))
                 {
-                    fFixed = 0.0F;
+                    float fTemp;
+#if defined(PT100_Sensor) && (PT100_Sensor == 1)
+                    fTemp = prv_TempCalcPT100(fVoltage);
+#elif defined(NTC_Sensor) && (NTC_Sensor == 1)
+                    fTemp = prv_TempCalcNTC(fVoltage);
+#else
+                    fTemp = (float)u16Avg;
+#endif
+                    /* Store as fixed-point (0.01 °C units) */
+                    float fFixed = fTemp * 100.0F;
+                    if (fFixed < 0.0F)
+                    {
+                        fFixed = 0.0F;
+                    }
+                    u16FixedResult = (uint16_t)fFixed;
                 }
-                currentTempAIQueueBuffer[i] = (uint16_t)fFixed;
+                else
+                {
+                    /* u16Vol is uint16_t (integer volts*Vref/4095), compare correctly */
+                    if (u16Vol > 2.7F) /* adjust threshold to match your scaling */
+                    {
+                        u16FixedResult = 1U;
+                    }
+                    else
+                    {
+                        u16FixedResult = 0U;
+                    }
+                }
+
+                currentTempAIQueueBuffer[i] = u16FixedResult;
+                // SYS_CONSOLE_PRINT("Current status -> AI%d: %u ", (unsigned)i, (unsigned)u16FixedResult);
             }
             else
             {

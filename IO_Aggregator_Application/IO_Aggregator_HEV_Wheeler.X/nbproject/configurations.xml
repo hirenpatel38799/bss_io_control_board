@@ -1206,7 +1206,7 @@
         <targetPluginBoard></targetPluginBoard>
         <platformTool>PK5Tool</platformTool>
         <languageToolchain>XC32</languageToolchain>
-        <languageToolchainVersion>5.00</languageToolchainVersion>
+        <languageToolchainVersion>5.10</languageToolchainVersion>
         <platform>3</platform>
       </toolsSet>
       <packs>
